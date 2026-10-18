@@ -1,0 +1,20 @@
+# Rust
+target/
+**/*.rs.bk
+
+# Third-party reference sources (do not republish; see README credits)
+docs/reference/
+
+# Personal test captures — NEVER commit (they contain faces)
+docs/*.jpg
+docs/*.jpeg
+docs/*.png
+docs/*.ppm
+
+# Downloaded archives
+*.zip
+*.tar.gz
+
+# IDE
+.idea/
+.vscode/

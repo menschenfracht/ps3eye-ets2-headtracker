@@ -1,0 +1,72 @@
+[package]
+name = "headtrack"
+description = "DIY head tracker for ETS2 built on the PS3 Eye (OV534) camera"
+version = "0.1.0"
+edition = "2024"
+license = "GPL-2.0-only"
+keywords = ["head-tracking", "ets2", "ps3eye", "ov534"]
+categories = ["multimedia::video"]
+
+[dependencies]
+rusb = { version = "0.9", features = ["vendored"] }
+thiserror = "2.0"
+anyhow = "1.0"
+log = "0.4"
+env_logger = "0.11"
+
+[profile.dev]
+opt-level = 1
+
+[profile.dev.package."*"]
+opt-level = 3
+
+[profile.release]
+opt-level = 3
+lto = "thin"
+codegen-units = 1
+panic = "abort"
+strip = true
+
+[lints.clippy]
+all         = { level = "warn", priority = -1 }
+nursery     = { level = "warn", priority = -1 }
+cargo       = { level = "warn", priority = -1 }
+perf        = { level = "warn", priority = -1 }
+pedantic    = { level = "warn", priority = -1 }
+correctness = { level = "deny", priority = -1 }
+
+# Dependency hell
+multiple_crate_versions = { level = "allow", priority = 0 }
+
+# Arbitrary restrictions - let's try to do without them
+shadow_reuse     = { level = "warn", priority = 0 }
+shadow_same      = { level = "warn", priority = 0 }
+shadow_unrelated = { level = "warn", priority = 0 }
+
+# Let's try to get rid of slicing
+indexing_slicing = { level = "deny", priority = 0 }
+
+# Let's conform to a style
+implicit_return = { level = "allow", priority = 0 }
+needless_return = { level = "warn", priority = 0 }
+unseparated_literal_suffix = { level = "warn", priority = 0 }
+min_ident_chars = { level = "warn", priority = 0 }
+doc_paragraphs_missing_punctuation = { level = "warn", priority = 0 }
+
+# We use the `log` crate instead of printing
+print_stderr = { level = "warn", priority = 0 }
+print_stdout = { level = "warn", priority = 0 }
+
+# 'Allow' rules
+allow_attributes = { level = "warn", priority = 0 }
+allow_attributes_without_reason = { level = "warn", priority = 0 }
+
+# Let's try to be idiomatic
+manual_slice_fill = { level = "warn", priority = 0 }
+unnecessary_map_or = { level = "warn", priority = 0 }
+unnecessary_operation = { level = "warn", priority = 0 }
+unnecessary_sort_by = { level = "warn", priority = 0 }
+useless_borrows_in_formatting = { level = "warn", priority = 0 }
+collapsible_if = { level = "warn", priority = 0 }
+map_unwrap_or = { level = "warn", priority = 0 }
+explicit_counter_loop = { level = "deny", priority = 0 }
