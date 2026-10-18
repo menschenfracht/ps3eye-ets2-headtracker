@@ -133,7 +133,7 @@ fn detect_loop(eye: &Ps3Eye, width: usize, height: usize) -> Result<()> {
             for face in &faces {
                 draw_rect(&mut rgb, width, height, bx(face.x0), bx(face.y0), bx(face.x1), bx(face.y1), 255, 0, 0);
             }
-            let path = format!("D:\\_coding\\Headtrack\\docs\\m2_{width}x{height}_{frames:05}.ppm");
+            let path = format!("docs/m2_{width}x{height}_{frames:05}.ppm");
             save_ppm(&path, &rgb, width, height)?;
             log::info!("sample frame {frames} saved to {path}");
         }
@@ -159,7 +159,7 @@ fn capture_loop(eye: &Ps3Eye, width: usize, height: usize) -> Result<()> {
         let mut rgb = vec![0_u8; width * height * 3];
         bayer::bayer_grbg_to_rgb(&raw, width, height, &mut rgb);
         if frames % SAMPLE_EVERY == 0 {
-            let path = format!("D:\\_coding\\Headtrack\\docs\\cap_{width}x{height}_{frames:05}.ppm");
+            let path = format!("docs/cap_{width}x{height}_{frames:05}.ppm");
             save_ppm(&path, &rgb, width, height)?;
             log::info!("clean sample frame {frames} saved to {path}");
         }

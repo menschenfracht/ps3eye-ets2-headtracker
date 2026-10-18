@@ -11,8 +11,8 @@ Instructions for AI coding agents (and humans) working in this repository.
   derived from the Linux kernel `gspca-ov534` driver (GPLv2-only), via
   PS3EYEDriver (MIT new code / GPLv2 kernel-derived parts). Do NOT change to
   a permissive license; do NOT remove the credits section in `README.md`.
-- `docs/reference/` holds third-party source for porting. It is **gitignored**
-  — never commit it, never republish it.
+- Third-party reference source used for porting is **gitignored** — never
+  commit it, never republish it.
 
 ## Privacy rules — hard requirements
 
@@ -29,16 +29,8 @@ Hardware: **Sony PlayStation 3 Eye** camera. Goal: rough head tracking
 
 ## Layout
 
-```
-D:\_coding\Headtrack\
-├── apps\
-│   ├── PS3EyeFilter\   DirectShow source filter (makes the PS3 Eye a webcam)
-│   ├── AITrack\        reference AI tracker (fallback / comparison)
-│   └── opentrack\      smoothing + TrackIR output bridge for ETS2
-├── src\                the Rust tracker crate (ours)
-├── docs\               protocol notes, calibration records, research
-└── AGENTS.md           this file
-```
+`src/` is the Rust tracker crate; `models/` holds the ONNX models (see
+`models/NOTICE.md`); `docs/` holds protocol notes and research.
 
 ## Environment quirks — READ BEFORE RUNNING ANYTHING
 
@@ -47,16 +39,16 @@ D:\_coding\Headtrack\
 - **CMD from WSL starts in an unsupported UNC path** (`\\wsl.localhost\...`) and
   prints a warning, defaulting to `C:\Windows`. ALWAYS pin the working
   directory explicitly:
-  - CMD: `cmd /c "cd /d D:\_coding\Headtrack\src && cargo build"`
-  - PowerShell: `Set-Location D:\_coding\Headtrack\src; ...`
+  - CMD: `cmd /c "cd /d <repo> && cargo build"`
+  - PowerShell: `Set-Location <repo>; ...`
 - Admin operations require a **UAC prompt on the user's screen**: write a
   `.ps1` script, launch with
   `Start-Process powershell -Verb RunAs -Wait -ArgumentList '...'`,
   have the script `Start-Transcript` to a log file, then read the log.
-- The Windows side has its own **rustup/cargo (1.99)**. Build and run the
+- The Windows side has its own **rustup/cargo**. Build and run the
   tracker from the Windows side only (camera + ETS2 are Windows-only).
   Never assume the WSL rustup is the same toolchain.
-- Prefer `D:\_coding\Headtrack\...` paths: no spaces, no Cyrillic, no OneDrive.
+- Avoid paths with spaces, Cyrillic, or OneDrive.
 
 ## Hardware / driver facts (as of 2026-10-18)
 
@@ -67,8 +59,8 @@ D:\_coding\Headtrack\
   `wdma_usb.inf` / `usbaudio`). Both must show ProblemCode 0.
 - The old deprecated **libusb-win32 1.2.6.0** driver was fully uninstalled
   (driver store, service, self-signed certs). Do NOT reinstall it.
-- Driver package backup: `C:\USBCAM-libusbK\` (regenerate with
-  `libusbK-inf-wizard.exe` from `~/webcam win drivers/libusbK-dev-kit/`).
+- Keep a driver package backup; regenerate it with `libusbK-inf-wizard.exe`
+  if needed.
 - The camera firmware **gets stuck** if apps exit uncleanly or USB power
   management kicks in. Recovery: `pnputil /disable-device` +
   `/enable-device` on the parent instance — NOT replugging (replugs spawn
@@ -130,9 +122,8 @@ Output, in order of appearance:
 
 ## House rules
 
-- Don't touch anything outside `D:\_coding\Headtrack\` and the documented
-  driver backup paths without asking.
-- `webcam win drivers\` in the WSL home is a **driver archive** — read-only.
+- Don't touch anything outside the project directory without asking.
+- The driver archive is **read-only**.
 - Keep tools portable where possible; document any registry change in `docs\`.
 - When changing driver/USB state, verify with
   `Get-PnpDevice | ? InstanceId -like '*VID_1415*'` afterwards and report
