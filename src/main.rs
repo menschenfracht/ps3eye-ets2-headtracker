@@ -202,7 +202,8 @@ fn preview_loop(eye: &Ps3Eye, width: usize, height: usize) -> Result<()> {
     let mut buffer = vec![0_u32; width * height];
     let mut frames: usize = 0;
     let mut prev_center: Option<(f32, f32)> = None;
-    let mut smoothed: Option<pose::Pose> = None;
+    let mut smoothed_lm: Option<[(f32, f32); 5]> = None;
+    let mut last_pose: Option<pose::Pose> = None;
     let mut neutral: Option<pose::Pose> = None;
     let mut calibrating: Option<Instant> = None;
     let mut calib_samples: Vec<pose::Pose> = Vec::new();
@@ -221,9 +222,9 @@ fn preview_loop(eye: &Ps3Eye, width: usize, height: usize) -> Result<()> {
         //     log::info!("calibration started — hold still for 10 s");
         // }
 
-        // Single-press recenter: capture the current smoothed pose as neutral.
+        // Single-press recenter: capture the current pose as neutral.
         if window.is_key_pressed(minifb::Key::R, minifb::KeyRepeat::No) {
-            if let Some(p) = smoothed {
+            if let Some(p) = last_pose {
                 neutral = Some(p);
                 log::info!(
                     "recentered: neutral yaw={:+.1}° pitch={:+.1}° roll={:+.1}°",
@@ -307,28 +308,32 @@ fn preview_loop(eye: &Ps3Eye, width: usize, height: usize) -> Result<()> {
 
         let faces = detector.detect(&rgb, width, height)?;
         if let Some(face) = select_face(&faces, prev_center) {
+            let landmarks = match smoothed_lm {
+                Some(prev) => blend_landmarks(prev, face.landmarks, tuning.smoothing),
+                None => face.landmarks,
+            };
+            smoothed_lm = Some(landmarks);
+
             draw_rect(&mut rgb, width, height, bx(face.x0), bx(face.y0), bx(face.x1), bx(face.y1), 255, 0, 0);
 
-            let [_right_eye, left_eye, nose, _mouth_r, _mouth_l] = face.landmarks;
-            let right_eye = face.landmarks[0];
-            let eye_dist = (right_eye.0 - left_eye.0).hypot(right_eye.1 - left_eye.1);
+            let [eye_left, eye_right, nose, _mouth_r, _mouth_l] = landmarks;
+            let eye_dist = (eye_right.0 - eye_left.0).hypot(eye_right.1 - eye_left.1);
             prev_center = Some(face.center());
 
             // Eye line (roll) in yellow, nose direction (yaw/pitch) in cyan.
-            draw_line(&mut rgb, width, height, left_eye, right_eye, 255, 255, 0);
+            draw_line(&mut rgb, width, height, eye_left, eye_right, 255, 255, 0);
             let eye_mid = (
-                (left_eye.0 + right_eye.0) * 0.5,
-                (left_eye.1 + right_eye.1) * 0.5,
+                (eye_left.0 + eye_right.0) * 0.5,
+                (eye_left.1 + eye_right.1) * 0.5,
             );
             draw_line(&mut rgb, width, height, eye_mid, nose, 0, 255, 255);
 
-            for point in face.landmarks {
+            for point in landmarks {
                 draw_dot(&mut rgb, width, height, point.0, point.1, 0, 255, 0);
             }
 
-            let raw_pose = pose::estimate(&face.pose_points());
-            let pose = smooth_pose(smoothed, raw_pose, tuning.smoothing);
-            smoothed = Some(pose);
+            let pose = pose::estimate(&[eye_left, eye_right, nose]);
+            last_pose = Some(pose);
 
             if let Some(start) = calibrating {
                 calib_samples.push(pose);
@@ -355,7 +360,7 @@ fn preview_loop(eye: &Ps3Eye, width: usize, height: usize) -> Result<()> {
             } else {
                 "UNCALIBRATED"
             };
-            draw_hud(&mut rgb, width, height, state, face, shown, &tuning);
+            draw_hud(&mut rgb, width, height, state, eye_dist, shown, &tuning);
             if frames % TARGET_FPS as usize == 0 {
                 log::info!(
                     "{state:12} eye_dist={eye_dist:4.1}px  yaw {:>6.1}  pitch {:>6.1}  roll {:>6.1}  [gain {:.1}/{:.1} dz {:.1} sm {:.2}]",
@@ -391,16 +396,13 @@ fn select_face<'a>(faces: &'a [face::Face], prev: Option<(f32, f32)>) -> Option<
     })
 }
 
-/// Exponential moving average over a pose.
-fn smooth_pose(prev: Option<pose::Pose>, cur: pose::Pose, alpha: f32) -> pose::Pose {
-    match prev {
-        Some(p) => pose::Pose {
-            yaw: p.yaw + (cur.yaw - p.yaw) * alpha,
-            pitch: p.pitch + (cur.pitch - p.pitch) * alpha,
-            roll: p.roll + (cur.roll - p.roll) * alpha,
-        },
-        None => cur,
+/// Exponential blend of two landmark sets (frame-to-frame smoothing).
+fn blend_landmarks(prev: [(f32, f32); 5], cur: [(f32, f32); 5], alpha: f32) -> [(f32, f32); 5] {
+    let mut out = cur;
+    for (o, (&p, &c)) in out.iter_mut().zip(prev.iter().zip(cur.iter())) {
+        *o = (p.0 + (c.0 - p.0) * alpha, p.1 + (c.1 - p.1) * alpha);
     }
+    out
 }
 
 /// Mean of a set of pose samples.
@@ -665,7 +667,7 @@ fn draw_hud(
     width: usize,
     height: usize,
     state: &str,
-    face: &face::Face,
+    eye_dist: f32,
     shown: pose::Pose,
     tuning: &pose::Tuning,
 ) {
@@ -676,9 +678,6 @@ fn draw_hud(
     );
     draw_text_shadow(rgb, width, height, 6, 6, &line1, 2, 255, 255, 255);
 
-    let (ax, ay) = face.landmarks[0];
-    let (bx, by) = face.landmarks[1];
-    let eye_dist = (ax - bx).hypot(ay - by);
     let line2 = format!(
         "EYES {eye_dist:4.0}px  GAIN {:.1}/{:.1}  DZ {:.1}  SM {:.2}  INV {}/{}/{}",
         tuning.yaw_gain,

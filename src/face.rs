@@ -41,13 +41,6 @@ impl Face {
     pub fn center(&self) -> (f32, f32) {
         ((self.x0 + self.x1) * 0.5, (self.y0 + self.y1) * 0.5)
     }
-
-    /// Image-left eye, image-right eye and nose tip, in the order the pose
-    /// expects. YuNet lists the person's right eye first (image-left).
-    #[must_use]
-    pub fn pose_points(&self) -> [(f32, f32); 3] {
-        [self.landmarks[0], self.landmarks[1], self.landmarks[2]]
-    }
 }
 
 /// A square crop region for the landmark model, in source pixel coordinates.
