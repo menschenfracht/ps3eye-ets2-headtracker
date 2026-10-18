@@ -204,6 +204,7 @@ fn preview_loop(eye: &Ps3Eye, width: usize, height: usize) -> Result<()> {
     let mut prev_center: Option<(f32, f32)> = None;
     let mut smoothed_lm: Option<[(f32, f32); 5]> = None;
     let mut smoothed_box: Option<(f32, f32, f32, f32)> = None;
+    let mut ref_eye: f32 = 0.0;
     let mut last_pose: Option<pose::Pose> = None;
     let mut neutral: Option<pose::Pose> = None;
     let mut calibrating: Option<Instant> = None;
@@ -309,23 +310,33 @@ fn preview_loop(eye: &Ps3Eye, width: usize, height: usize) -> Result<()> {
 
         let faces = detector.detect(&rgb, width, height)?;
         if let Some(face) = select_face(&faces, prev_center) {
-            let landmarks = match smoothed_lm {
-                Some(prev) => blend_landmarks(prev, face.landmarks, tuning.smoothing),
-                None => face.landmarks,
-            };
-            smoothed_lm = Some(landmarks);
+            let eye = face.eye_distance();
+            ref_eye = (ref_eye * 0.999).max(eye);
+            // Freeze when the detected "face" is much smaller than the tracked
+            // one: at extreme angles YuNet sees only a sub-region.
+            if eye >= 0.6 * ref_eye {
+                let landmarks = match smoothed_lm {
+                    Some(prev) => blend_landmarks(prev, face.landmarks, tuning.smoothing),
+                    None => face.landmarks,
+                };
+                smoothed_lm = Some(landmarks);
 
-            let raw_box = (face.x0, face.y0, face.x1, face.y1);
-            let box_ = match smoothed_box {
-                Some(prev) => blend_box(prev, raw_box, tuning.smoothing),
-                None => raw_box,
-            };
-            smoothed_box = Some(box_);
+                let raw_box = (face.x0, face.y0, face.x1, face.y1);
+                let box_ = match smoothed_box {
+                    Some(prev) => blend_box(prev, raw_box, tuning.smoothing),
+                    None => raw_box,
+                };
+                smoothed_box = Some(box_);
+                prev_center = Some(face.center());
+            }
+        }
+
+        // Draw the overlay from the (possibly frozen) smoothed values.
+        if let (Some(landmarks), Some(box_)) = (smoothed_lm, smoothed_box) {
             draw_rect(&mut rgb, width, height, bx(box_.0), bx(box_.1), bx(box_.2), bx(box_.3), 255, 0, 0);
 
             let [eye_left, eye_right, nose, _mouth_r, _mouth_l] = landmarks;
             let eye_dist = (eye_right.0 - eye_left.0).hypot(eye_right.1 - eye_left.1);
-            prev_center = Some(face.center());
 
             // Eye line (roll) in yellow, nose direction (yaw/pitch) in cyan.
             draw_line(&mut rgb, width, height, eye_left, eye_right, 255, 255, 0);
