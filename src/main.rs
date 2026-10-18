@@ -194,8 +194,9 @@ fn preview_loop(eye: &Ps3Eye, width: usize, height: usize) -> Result<()> {
     )
     .context("failed to open the preview window")?;
 
-    let (cx, cy) = (width as f32 * 0.5, height as f32 * 0.5);
-    let (mut rx, mut ry) = (110.0_f32, 140.0_f32);
+    // Oval guide disabled while tuning.
+    // let (cx, cy) = (width as f32 * 0.5, height as f32 * 0.5);
+    // let (mut rx, mut ry) = (110.0_f32, 140.0_f32);
 
     let mut buffer = vec![0_u32; width * height];
     let mut frames: usize = 0;
@@ -204,6 +205,7 @@ fn preview_loop(eye: &Ps3Eye, width: usize, height: usize) -> Result<()> {
     let mut neutral: Option<pose::Pose> = None;
     let mut calibrating: Option<Instant> = None;
     let mut calib_samples: Vec<pose::Pose> = Vec::new();
+    let mut tuning = pose::Tuning::default();
 
     while window.is_open() && !window.is_key_down(minifb::Key::Escape) {
         let raw = eye.read_raw_frame().context("frame read failed")?;
@@ -211,35 +213,96 @@ fn preview_loop(eye: &Ps3Eye, width: usize, height: usize) -> Result<()> {
         let mut rgb = vec![0_u8; width * height * 3];
         bayer::bayer_grbg_to_rgb(&raw, width, height, &mut rgb);
 
-        if window.is_key_down(minifb::Key::F) && calibrating.is_none() {
-            calibrating = Some(Instant::now());
-            calib_samples.clear();
-            log::info!("calibration started — hold still for 10 s");
+        // Calibration disabled while tuning; uncomment to re-enable.
+        // if window.is_key_down(minifb::Key::F) && calibrating.is_none() {
+        //     calibrating = Some(Instant::now());
+        //     calib_samples.clear();
+        //     log::info!("calibration started — hold still for 10 s");
+        // }
+
+        // Single-press recenter: capture the current smoothed pose as neutral.
+        if window.is_key_pressed(minifb::Key::R, minifb::KeyRepeat::No) {
+            if let Some(p) = smoothed {
+                neutral = Some(p);
+                log::info!(
+                    "recentered: neutral yaw={:+.1}° pitch={:+.1}° roll={:+.1}°",
+                    p.yaw,
+                    p.pitch,
+                    p.roll
+                );
+            }
         }
 
-        // Resize the oval guide: '+'/'=' enlarges, '-' shrinks.
-        if window.is_key_pressed(minifb::Key::Equal, minifb::KeyRepeat::No)
-            || window.is_key_pressed(minifb::Key::NumPadPlus, minifb::KeyRepeat::No)
-        {
-            rx *= 1.1;
-            ry *= 1.1;
-            log::info!("oval enlarged to {rx:.0} x {ry:.0} px");
-        }
-        if window.is_key_pressed(minifb::Key::Minus, minifb::KeyRepeat::No)
-            || window.is_key_pressed(minifb::Key::NumPadMinus, minifb::KeyRepeat::No)
-        {
-            rx = (rx / 1.1).max(30.0_f32);
-            ry = (ry / 1.1).max(40.0_f32);
-            log::info!("oval shrunk to {rx:.0} x {ry:.0} px");
-        }
+        // Oval resize disabled while tuning.
+        // if window.is_key_pressed(minifb::Key::Equal, minifb::KeyRepeat::No)
+        //     || window.is_key_pressed(minifb::Key::NumPadPlus, minifb::KeyRepeat::No)
+        // {
+        //     rx *= 1.1;
+        //     ry *= 1.1;
+        //     log::info!("oval enlarged to {rx:.0} x {ry:.0} px");
+        // }
+        // if window.is_key_pressed(minifb::Key::Minus, minifb::KeyRepeat::No)
+        //     || window.is_key_pressed(minifb::Key::NumPadMinus, minifb::KeyRepeat::No)
+        // {
+        //     rx = (rx / 1.1).max(30.0_f32);
+        //     ry = (ry / 1.1).max(40.0_f32);
+        //     log::info!("oval shrunk to {rx:.0} x {ry:.0} px");
+        // }
 
-        // Guide oval: green while idle, orange while calibrating.
-        let (or, og, ob) = if calibrating.is_some() {
-            (255_u8, 165, 0)
-        } else {
-            (0_u8, 255, 0)
-        };
-        draw_oval(&mut rgb, width, height, cx, cy, rx, ry, or, og, ob);
+        // Oval guide disabled while tuning.
+        // let (or, og, ob) = if calibrating.is_some() {
+        //     (255_u8, 165, 0)
+        // } else {
+        //     (0_u8, 255, 0)
+        // };
+        // draw_oval(&mut rgb, width, height, cx, cy, rx, ry, or, og, ob);
+
+        // Tuning keys: [ ] yaw gain, ; ' pitch gain, , . deadzone,
+        // n m smoothing, i/o/p invert yaw/pitch/roll.
+        if window.is_key_pressed(minifb::Key::RightBracket, minifb::KeyRepeat::No) {
+            tuning.yaw_gain = (tuning.yaw_gain + 0.1).min(6.0);
+            log::info!("yaw_gain {:.1}", tuning.yaw_gain);
+        }
+        if window.is_key_pressed(minifb::Key::LeftBracket, minifb::KeyRepeat::No) {
+            tuning.yaw_gain = (tuning.yaw_gain - 0.1).max(0.5);
+            log::info!("yaw_gain {:.1}", tuning.yaw_gain);
+        }
+        if window.is_key_pressed(minifb::Key::Apostrophe, minifb::KeyRepeat::No) {
+            tuning.pitch_gain = (tuning.pitch_gain + 0.1).min(6.0);
+            log::info!("pitch_gain {:.1}", tuning.pitch_gain);
+        }
+        if window.is_key_pressed(minifb::Key::Semicolon, minifb::KeyRepeat::No) {
+            tuning.pitch_gain = (tuning.pitch_gain - 0.1).max(0.5);
+            log::info!("pitch_gain {:.1}", tuning.pitch_gain);
+        }
+        if window.is_key_pressed(minifb::Key::Period, minifb::KeyRepeat::No) {
+            tuning.deadzone = (tuning.deadzone + 0.1).min(5.0);
+            log::info!("deadzone {:.1}°", tuning.deadzone);
+        }
+        if window.is_key_pressed(minifb::Key::Comma, minifb::KeyRepeat::No) {
+            tuning.deadzone = (tuning.deadzone - 0.1).max(0.0);
+            log::info!("deadzone {:.1}°", tuning.deadzone);
+        }
+        if window.is_key_pressed(minifb::Key::M, minifb::KeyRepeat::No) {
+            tuning.smoothing = (tuning.smoothing + 0.05).min(1.0);
+            log::info!("smoothing {:.2}", tuning.smoothing);
+        }
+        if window.is_key_pressed(minifb::Key::N, minifb::KeyRepeat::No) {
+            tuning.smoothing = (tuning.smoothing - 0.05).max(0.05);
+            log::info!("smoothing {:.2}", tuning.smoothing);
+        }
+        if window.is_key_pressed(minifb::Key::I, minifb::KeyRepeat::No) {
+            tuning.invert_yaw = !tuning.invert_yaw;
+            log::info!("invert_yaw {}", tuning.invert_yaw);
+        }
+        if window.is_key_pressed(minifb::Key::O, minifb::KeyRepeat::No) {
+            tuning.invert_pitch = !tuning.invert_pitch;
+            log::info!("invert_pitch {}", tuning.invert_pitch);
+        }
+        if window.is_key_pressed(minifb::Key::P, minifb::KeyRepeat::No) {
+            tuning.invert_roll = !tuning.invert_roll;
+            log::info!("invert_roll {}", tuning.invert_roll);
+        }
 
         let faces = detector.detect(&rgb, width, height)?;
         if let Some(face) = select_face(&faces, prev_center) {
@@ -263,7 +326,7 @@ fn preview_loop(eye: &Ps3Eye, width: usize, height: usize) -> Result<()> {
             }
 
             let raw_pose = pose::estimate(&face.pose_points());
-            let pose = smooth_pose(smoothed, raw_pose, 0.35);
+            let pose = smooth_pose(smoothed, raw_pose, tuning.smoothing);
             smoothed = Some(pose);
 
             if let Some(start) = calibrating {
@@ -283,11 +346,7 @@ fn preview_loop(eye: &Ps3Eye, width: usize, height: usize) -> Result<()> {
                 }
             }
 
-            let shown = neutral.map_or(pose, |n| pose::Pose {
-                yaw: pose.yaw - n.yaw,
-                pitch: pose.pitch - n.pitch,
-                roll: pose.roll - n.roll,
-            });
+            let shown = tuning.apply(pose, neutral);
             if frames % TARGET_FPS as usize == 0 {
                 let state = if calibrating.is_some() {
                     "calibrating"
@@ -297,10 +356,14 @@ fn preview_loop(eye: &Ps3Eye, width: usize, height: usize) -> Result<()> {
                     "uncalibrated"
                 };
                 log::info!(
-                    "{state:12} eye_dist={eye_dist:4.1}px  yaw {:>6.1}°  pitch {:>6.1}°  roll {:>6.1}°",
+                    "{state:12} eye_dist={eye_dist:4.1}px  yaw {:>6.1}°  pitch {:>6.1}°  roll {:>6.1}°  [gain {:.1}/{:.1} dz {:.1} sm {:.2}]",
                     shown.yaw,
                     shown.pitch,
-                    shown.roll
+                    shown.roll,
+                    tuning.yaw_gain,
+                    tuning.pitch_gain,
+                    tuning.deadzone,
+                    tuning.smoothing
                 );
             }
         }
@@ -359,6 +422,7 @@ fn mean_pose(samples: &[pose::Pose]) -> pose::Pose {
 }
 
 /// Draw the outline of an ellipse (the head-position guide).
+#[allow(dead_code, reason = "oval guide is disabled while tuning")]
 #[expect(
     clippy::indexing_slicing,
     reason = "pixel offsets are within the validated frame dimensions"
