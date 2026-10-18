@@ -17,6 +17,7 @@ mod async_stream;
 mod bayer;
 mod camera;
 mod face;
+mod font;
 mod landmark;
 mod ov534;
 mod pose;
@@ -347,16 +348,17 @@ fn preview_loop(eye: &Ps3Eye, width: usize, height: usize) -> Result<()> {
             }
 
             let shown = tuning.apply(pose, neutral);
+            let state = if calibrating.is_some() {
+                "CALIBRATING"
+            } else if neutral.is_some() {
+                "TRACKING"
+            } else {
+                "UNCALIBRATED"
+            };
+            draw_hud(&mut rgb, width, height, state, face, shown, &tuning);
             if frames % TARGET_FPS as usize == 0 {
-                let state = if calibrating.is_some() {
-                    "calibrating"
-                } else if neutral.is_some() {
-                    "tracking"
-                } else {
-                    "uncalibrated"
-                };
                 log::info!(
-                    "{state:12} eye_dist={eye_dist:4.1}px  yaw {:>6.1}°  pitch {:>6.1}°  roll {:>6.1}°  [gain {:.1}/{:.1} dz {:.1} sm {:.2}]",
+                    "{state:12} eye_dist={eye_dist:4.1}px  yaw {:>6.1}  pitch {:>6.1}  roll {:>6.1}  [gain {:.1}/{:.1} dz {:.1} sm {:.2}]",
                     shown.yaw,
                     shown.pitch,
                     shown.roll,
@@ -592,6 +594,127 @@ fn draw_dot(rgb: &mut [u8], width: usize, height: usize, x: f32, y: f32, r: u8, 
             put_px(rgb, width, height, x + dx, y + dy, r, g, b);
         }
     }
+}
+
+/// Draw a string with the 5x7 font, `scale` screen pixels per font pixel.
+#[expect(
+    clippy::indexing_slicing,
+    reason = "glyph index is bounded by the ASCII 32..=126 check"
+)]
+fn draw_text(
+    rgb: &mut [u8],
+    width: usize,
+    height: usize,
+    x: usize,
+    y: usize,
+    text: &str,
+    scale: usize,
+    r: u8,
+    g: u8,
+    b: u8,
+) {
+    let mut cx = x;
+    for ch in text.bytes() {
+        if (32..=126).contains(&ch) {
+            let glyph = font::FONT5X7[usize::from(ch - 32)];
+            for (col, &bits) in glyph.iter().enumerate() {
+                for row in 0..7 {
+                    if bits & (1 << row) != 0 {
+                        for dy in 0..scale {
+                            for dx in 0..scale {
+                                put_px(
+                                    rgb,
+                                    width,
+                                    height,
+                                    cx + col * scale + dx,
+                                    y + row * scale + dy,
+                                    r,
+                                    g,
+                                    b,
+                                );
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        cx += 6 * scale;
+    }
+}
+
+/// Draw a string with a 1px black shadow so it reads over video.
+fn draw_text_shadow(
+    rgb: &mut [u8],
+    width: usize,
+    height: usize,
+    x: usize,
+    y: usize,
+    text: &str,
+    scale: usize,
+    r: u8,
+    g: u8,
+    b: u8,
+) {
+    draw_text(rgb, width, height, x + 1, y + 1, text, scale, 0, 0, 0);
+    draw_text(rgb, width, height, x, y, text, scale, r, g, b);
+}
+
+/// Draw the tuning HUD: state, pose, settings and key help.
+fn draw_hud(
+    rgb: &mut [u8],
+    width: usize,
+    height: usize,
+    state: &str,
+    face: &face::Face,
+    shown: pose::Pose,
+    tuning: &pose::Tuning,
+) {
+    let yes = |v: bool| if v { "Y" } else { "N" };
+    let line1 = format!(
+        "{state}  YAW {:+5.1}  PITCH {:+5.1}  ROLL {:+5.1}",
+        shown.yaw, shown.pitch, shown.roll
+    );
+    draw_text_shadow(rgb, width, height, 6, 6, &line1, 2, 255, 255, 255);
+
+    let (ax, ay) = face.landmarks[0];
+    let (bx, by) = face.landmarks[1];
+    let eye_dist = (ax - bx).hypot(ay - by);
+    let line2 = format!(
+        "EYES {eye_dist:4.0}px  GAIN {:.1}/{:.1}  DZ {:.1}  SM {:.2}  INV {}/{}/{}",
+        tuning.yaw_gain,
+        tuning.pitch_gain,
+        tuning.deadzone,
+        tuning.smoothing,
+        yes(tuning.invert_yaw),
+        yes(tuning.invert_pitch),
+        yes(tuning.invert_roll)
+    );
+    draw_text_shadow(rgb, width, height, 6, 32, &line2, 1, 0, 255, 200);
+
+    draw_text_shadow(
+        rgb,
+        width,
+        height,
+        6,
+        height - 36,
+        "R RECENTER   [ ] YAW GAIN   ; ' PITCH GAIN   , . DEADZONE",
+        1,
+        220,
+        220,
+        220,
+    );
+    draw_text_shadow(
+        rgb,
+        width,
+        height,
+        6,
+        height - 22,
+        "N M SMOOTH   I O P INVERT   ESC QUIT",
+        1,
+        220,
+        220,
+        220,
+    );
 }
 
 /// Convert an interleaved RGB8 frame to a `0x00RRGGBB` buffer for minifb.
