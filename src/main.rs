@@ -202,6 +202,7 @@ fn preview_loop(eye: &Ps3Eye, width: usize, height: usize) -> Result<()> {
     let mut buffer = vec![0_u32; width * height];
     let mut frames: usize = 0;
     let mut prev_center: Option<(f32, f32)> = None;
+    let mut prev_eye: Option<f32> = None;
     let mut smoothed_lm: Option<[(f32, f32); 5]> = None;
     let mut smoothed_box: Option<(f32, f32, f32, f32)> = None;
     let mut last_pose: Option<pose::Pose> = None;
@@ -308,7 +309,7 @@ fn preview_loop(eye: &Ps3Eye, width: usize, height: usize) -> Result<()> {
         }
 
         let faces = detector.detect(&rgb, width, height)?;
-        if let Some(face) = select_face(&faces, prev_center) {
+        if let Some(face) = select_face(&faces, prev_center, prev_eye) {
             let landmarks = match smoothed_lm {
                 Some(prev) => blend_landmarks(prev, face.landmarks, tuning.smoothing),
                 None => face.landmarks,
@@ -326,6 +327,7 @@ fn preview_loop(eye: &Ps3Eye, width: usize, height: usize) -> Result<()> {
             let [eye_left, eye_right, nose, _mouth_r, _mouth_l] = landmarks;
             let eye_dist = (eye_right.0 - eye_left.0).hypot(eye_right.1 - eye_left.1);
             prev_center = Some(face.center());
+            prev_eye = Some(face.eye_distance());
 
             // Eye line (roll) in yellow, nose direction (yaw/pitch) in cyan.
             draw_line(&mut rgb, width, height, eye_left, eye_right, 255, 255, 0);
@@ -390,13 +392,22 @@ fn preview_loop(eye: &Ps3Eye, width: usize, height: usize) -> Result<()> {
     Ok(())
 }
 
-/// Pick the detection nearest the previous face centre, so the tracker doesn't
-/// jump between transient detections.
-fn select_face<'a>(faces: &'a [face::Face], prev: Option<(f32, f32)>) -> Option<&'a face::Face> {
-    let Some((px, py)) = prev else {
-        return faces.first();
+/// Pick the detection nearest the previous face centre, rejecting detections
+/// much smaller than the tracked face (sub-region glitches).
+fn select_face<'a>(
+    faces: &'a [face::Face],
+    prev_center: Option<(f32, f32)>,
+    prev_eye: Option<f32>,
+) -> Option<&'a face::Face> {
+    let min_eye = prev_eye.map_or(0.0, |e| e * 0.6);
+    let candidates: Vec<&face::Face> = faces
+        .iter()
+        .filter(|f| f.eye_distance() >= min_eye)
+        .collect();
+    let Some((px, py)) = prev_center else {
+        return candidates.first().copied();
     };
-    faces.iter().min_by(|a, b| {
+    candidates.into_iter().min_by(|a, b| {
         let (ax, ay) = a.center();
         let (bx, by) = b.center();
         (ax - px).hypot(ay - py).total_cmp(&(bx - px).hypot(by - py))
