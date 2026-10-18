@@ -203,6 +203,7 @@ fn preview_loop(eye: &Ps3Eye, width: usize, height: usize) -> Result<()> {
     let mut frames: usize = 0;
     let mut prev_center: Option<(f32, f32)> = None;
     let mut smoothed_lm: Option<[(f32, f32); 5]> = None;
+    let mut smoothed_box: Option<(f32, f32, f32, f32)> = None;
     let mut last_pose: Option<pose::Pose> = None;
     let mut neutral: Option<pose::Pose> = None;
     let mut calibrating: Option<Instant> = None;
@@ -314,7 +315,13 @@ fn preview_loop(eye: &Ps3Eye, width: usize, height: usize) -> Result<()> {
             };
             smoothed_lm = Some(landmarks);
 
-            draw_rect(&mut rgb, width, height, bx(face.x0), bx(face.y0), bx(face.x1), bx(face.y1), 255, 0, 0);
+            let raw_box = (face.x0, face.y0, face.x1, face.y1);
+            let box_ = match smoothed_box {
+                Some(prev) => blend_box(prev, raw_box, tuning.smoothing),
+                None => raw_box,
+            };
+            smoothed_box = Some(box_);
+            draw_rect(&mut rgb, width, height, bx(box_.0), bx(box_.1), bx(box_.2), bx(box_.3), 255, 0, 0);
 
             let [eye_left, eye_right, nose, _mouth_r, _mouth_l] = landmarks;
             let eye_dist = (eye_right.0 - eye_left.0).hypot(eye_right.1 - eye_left.1);
@@ -403,6 +410,20 @@ fn blend_landmarks(prev: [(f32, f32); 5], cur: [(f32, f32); 5], alpha: f32) -> [
         *o = (p.0 + (c.0 - p.0) * alpha, p.1 + (c.1 - p.1) * alpha);
     }
     out
+}
+
+/// Exponential blend of two bounding boxes `(x0, y0, x1, y1)`.
+fn blend_box(
+    prev: (f32, f32, f32, f32),
+    cur: (f32, f32, f32, f32),
+    alpha: f32,
+) -> (f32, f32, f32, f32) {
+    (
+        prev.0 + (cur.0 - prev.0) * alpha,
+        prev.1 + (cur.1 - prev.1) * alpha,
+        prev.2 + (cur.2 - prev.2) * alpha,
+        prev.3 + (cur.3 - prev.3) * alpha,
+    )
 }
 
 /// Mean of a set of pose samples.
