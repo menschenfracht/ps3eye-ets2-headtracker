@@ -117,6 +117,14 @@ Output, in order of appearance:
 - [ ] M4 — first drive in ETS2 (TrackIR enabled, `trackIR 1` if needed)
 - [ ] M5 — native TrackIR protocol (drop opentrack); optional IR night mode
 
+## Arithmetic and conversion rules
+
+- No bare `as` casts between numeric types. Use `T::try_from(x)` and handle the error, or a `From` impl when the widening is lossless.
+- Do arithmetic in a wider type before narrowing: sum in `u16` before halving a pair of `u8`, not after truncating to `u8`.
+- Narrow with `try_from(...).unwrap_or(MAX)` (or another explicit fallback) on hot paths; `expect` only where the value is an invariant with a stated reason.
+- Don't hide overflow with clamping (`saturating_*`, `clamp`) unless the saturation is the intended behavior and is noted at the call site.
+- Pointer and FFI casts (`as *mut T`, `.cast()`) are exempt, but each unsafe block needs a SAFETY comment.
+
 ## House rules
 
 - Don't touch anything outside `D:\_coding\Headtrack\` and the documented

@@ -15,7 +15,7 @@ use std::thread::JoinHandle;
 use std::time::Duration;
 
 use anyhow::{bail, Context, Result};
-use libc::{c_int, c_uint, c_void, timeval};
+use libc::{c_int, c_void, timeval};
 use libusb1_sys as ffi;
 use rusb::{DeviceHandle, GlobalContext};
 
@@ -129,7 +129,7 @@ impl AsyncStream {
                     c_int::try_from(TRANSFER_SIZE).expect("transfer size fits c_int"),
                     on_transfer,
                     ctx.cast::<c_void>(),
-                    0 as c_uint,
+                    0,
                 );
                 (*ctx).pending.fetch_add(1, Ordering::SeqCst);
                 let rc = ffi::libusb_submit_transfer(xfr);

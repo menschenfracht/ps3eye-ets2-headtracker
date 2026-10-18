@@ -7,7 +7,7 @@
 /// Average of two bytes, rounded like the reference driver (`(a + b + 1) >> 1`).
 #[inline]
 fn avg2(a: u8, b: u8) -> u8 {
-    ((u16::from(a) + u16::from(b) + 1) / 2) as u8
+    u8::try_from((u16::from(a) + u16::from(b) + 1) / 2).unwrap_or(u8::MAX)
 }
 
 /// Convert a raw GRBG Bayer frame into RGB8 (3 bytes per pixel: R, G, B).
