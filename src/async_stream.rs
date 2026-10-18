@@ -118,7 +118,11 @@ impl AsyncStream {
                 bail!("libusb_alloc_transfer failed");
             }
             stream.transfers.push(xfr);
-            let buffer = stream.buffers[index].as_mut_ptr();
+            let buffer = stream
+                .buffers
+                .get_mut(index)
+                .expect("transfer index is within the buffer ring")
+                .as_mut_ptr();
             // SAFETY: `buffer` lives as long as `stream`, which outlives the transfer.
             unsafe {
                 ffi::libusb_fill_bulk_transfer(

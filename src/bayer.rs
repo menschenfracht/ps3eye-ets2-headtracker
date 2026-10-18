@@ -16,6 +16,10 @@ fn avg2(a: u8, b: u8) -> u8 {
 ///
 /// # Panics
 /// Panics if `bayer` or `out` do not match the requested dimensions.
+#[expect(
+    clippy::indexing_slicing,
+    reason = "neighbour offsets are clamped into the validated frame and output buffers"
+)]
 pub fn bayer_grbg_to_rgb(bayer: &[u8], width: usize, height: usize, out: &mut [u8]) {
     assert_eq!(bayer.len(), width * height, "bayer buffer size mismatch");
     assert_eq!(out.len(), width * height * 3, "output buffer size mismatch");

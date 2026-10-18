@@ -93,6 +93,10 @@ impl PktScanner {
     }
 
     /// Port of gspca's `pkt_scan` for the bulk case.
+    #[expect(
+        clippy::indexing_slicing,
+        reason = "the 12-byte header and payload body are guarded by the length check above"
+    )]
     fn scan_payload(&mut self, payload: &[u8]) {
         if payload.len() < 12 || payload[0] != 12 {
             log::debug!("bad header");
