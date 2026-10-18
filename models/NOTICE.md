@@ -1,7 +1,6 @@
 # Model files
 
-Both models are licensed under the Apache License 2.0. Copies of the license text are
-in `LICENSE-APACHE`-equivalent form at https://www.apache.org/licenses/LICENSE-2.0.
+Both models are licensed under the Apache License 2.0 (full text: https://www.apache.org/licenses/LICENSE-2.0).
 
 | File | Origin | Notes |
 |---|---|---|
