@@ -4,10 +4,11 @@
 //! gspca-ov534 kernel driver. The bridge is commanded over USB control
 //! transfers; the image sensor sits behind it on an SCCB bus.
 
+use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::{bail, Context, Result};
-use rusb::{DeviceHandle, UsbContext};
+use rusb::{DeviceHandle, GlobalContext};
 
 /// Vendor request for both register reads and writes.
 const OV534_REQ_REG: u8 = 0x01;
@@ -24,27 +25,53 @@ const OP_READ_2: u8 = 0xf9;
 
 const CONTROL_TIMEOUT: Duration = Duration::from_millis(500);
 
+/// A device handle shareable across threads.
+///
+/// # Safety
+/// `rusb::DeviceHandle` is `Send` but deliberately not `Sync`. libusb's
+/// *synchronous* transfer API is documented thread-safe — concurrent sync
+/// transfers (our only use: control writes/reads and blocking bulk reads,
+/// each with its own internal event-handling lock) are explicitly allowed.
+/// We never install callbacks or run an external event loop, so the caveat
+/// about external event threads does not apply.
+pub struct SharedHandle(pub DeviceHandle<GlobalContext>);
+
+unsafe impl Sync for SharedHandle {}
+
 /// Register-level access to the OV534 bridge and the sensor behind it.
-pub struct Bridge<T: UsbContext> {
-    handle: DeviceHandle<T>,
+pub struct Bridge {
+    handle: Arc<SharedHandle>,
 }
 
-impl<T: UsbContext> Bridge<T> {
+impl Bridge {
     /// Wraps an already-opened device handle.
-    pub const fn new(handle: DeviceHandle<T>) -> Self {
+    pub const fn new(handle: Arc<SharedHandle>) -> Self {
         Self { handle }
     }
 
-    /// Consume the bridge, returning the underlying handle.
+    /// Consume the bridge, returning the underlying shared handle.
     #[must_use]
-    pub fn into_handle(self) -> DeviceHandle<T> {
+    pub fn into_handle(self) -> Arc<SharedHandle> {
         self.handle
+    }
+
+    /// Borrow the shared handle wrapper (for spawning I/O threads).
+    #[must_use]
+    pub fn shared(&self) -> &Arc<SharedHandle> {
+        &self.handle
+    }
+
+    /// Borrow the underlying device handle (for bulk I/O and endpoint ops).
+    #[must_use]
+    pub fn handle(&self) -> &DeviceHandle<GlobalContext> {
+        &self.handle.0
     }
 
     /// Write one bridge register.
     pub fn reg_write(&self, reg: u16, val: u8) -> Result<()> {
         let n = self
             .handle
+            .0
             .write_control(0x40, OV534_REQ_REG, 0x0000, reg, &[val], CONTROL_TIMEOUT)
             .context("ov534 register write failed")?;
         if n != 1 {
@@ -58,6 +85,7 @@ impl<T: UsbContext> Bridge<T> {
         let mut buf = [0_u8; 1];
         let n = self
             .handle
+            .0
             .read_control(0xC0, OV534_REQ_REG, 0x0000, reg, &mut buf, CONTROL_TIMEOUT)
             .context("ov534 register read failed")?;
         if n != 1 {
@@ -147,7 +175,6 @@ impl<T: UsbContext> Bridge<T> {
         Ok(())
     }
 }
-
 /// Frame rate table entry: `(fps, sensor 0x11, sensor 0x0d, bridge 0xe5)`.
 struct Rate {
     fps: u16,
@@ -201,13 +228,8 @@ const RATES_QVGA: [Rate; 22] = [
 /// Pick the closest supported frame rate and program it.
 ///
 /// With `dry_run` the value is only validated and returned.
-pub fn set_frame_rate<T: UsbContext>(
-    bridge: &Bridge<T>,
-    width: u32,
-    desired: u16,
-    dry_run: bool,
-) -> Result<u16> {
-    let table = if width == 640 { &RATES_VGA } else { &RATES_QVGA };
+pub fn set_frame_rate(bridge: &Bridge, width: u32, desired: u16, dry_run: bool) -> Result<u16> {
+    let table: &[Rate] = if width == 640 { &RATES_VGA } else { &RATES_QVGA };
     let rate = table
         .iter()
         .find(|rate| desired >= rate.fps)

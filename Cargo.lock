@@ -155,6 +155,8 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "env_logger",
+ "libc",
+ "libusb1-sys",
  "log",
  "rusb",
  "thiserror",
