@@ -202,7 +202,6 @@ fn preview_loop(eye: &Ps3Eye, width: usize, height: usize) -> Result<()> {
     let mut buffer = vec![0_u32; width * height];
     let mut frames: usize = 0;
     let mut prev_center: Option<(f32, f32)> = None;
-    let mut prev_eye: Option<f32> = None;
     let mut smoothed_lm: Option<[(f32, f32); 5]> = None;
     let mut smoothed_box: Option<(f32, f32, f32, f32)> = None;
     let mut last_pose: Option<pose::Pose> = None;
@@ -309,7 +308,7 @@ fn preview_loop(eye: &Ps3Eye, width: usize, height: usize) -> Result<()> {
         }
 
         let faces = detector.detect(&rgb, width, height)?;
-        if let Some(face) = select_face(&faces, prev_center, prev_eye) {
+        if let Some(face) = select_face(&faces, prev_center) {
             let landmarks = match smoothed_lm {
                 Some(prev) => blend_landmarks(prev, face.landmarks, tuning.smoothing),
                 None => face.landmarks,
@@ -327,7 +326,6 @@ fn preview_loop(eye: &Ps3Eye, width: usize, height: usize) -> Result<()> {
             let [eye_left, eye_right, nose, _mouth_r, _mouth_l] = landmarks;
             let eye_dist = (eye_right.0 - eye_left.0).hypot(eye_right.1 - eye_left.1);
             prev_center = Some(face.center());
-            prev_eye = Some(face.eye_distance());
 
             // Eye line (roll) in yellow, nose direction (yaw/pitch) in cyan.
             draw_line(&mut rgb, width, height, eye_left, eye_right, 255, 255, 0);
@@ -392,17 +390,17 @@ fn preview_loop(eye: &Ps3Eye, width: usize, height: usize) -> Result<()> {
     Ok(())
 }
 
-/// Pick the detection nearest the previous face centre, rejecting detections
-/// much smaller than the tracked face (sub-region glitches).
-fn select_face<'a>(
-    faces: &'a [face::Face],
-    prev_center: Option<(f32, f32)>,
-    prev_eye: Option<f32>,
-) -> Option<&'a face::Face> {
-    let min_eye = prev_eye.map_or(0.0, |e| e * 0.6);
+/// Pick the largest face (the user's), using the previous centre only as a
+/// tie-break. Sub-region false detections are always smaller, so this rejects
+/// them outright.
+fn select_face<'a>(faces: &'a [face::Face], prev_center: Option<(f32, f32)>) -> Option<&'a face::Face> {
+    let max_area = faces.iter().map(box_area).fold(0.0_f32, f32::max);
+    if max_area <= 0.0 {
+        return None;
+    }
     let candidates: Vec<&face::Face> = faces
         .iter()
-        .filter(|f| f.eye_distance() >= min_eye)
+        .filter(|f| box_area(f) >= 0.8 * max_area)
         .collect();
     let Some((px, py)) = prev_center else {
         return candidates.first().copied();
@@ -412,6 +410,11 @@ fn select_face<'a>(
         let (bx, by) = b.center();
         (ax - px).hypot(ay - py).total_cmp(&(bx - px).hypot(by - py))
     })
+}
+
+/// Bounding-box area.
+fn box_area(f: &face::Face) -> f32 {
+    (f.x1 - f.x0).max(0.0) * (f.y1 - f.y0).max(0.0)
 }
 
 /// Exponential blend of two landmark sets (frame-to-frame smoothing).

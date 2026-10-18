@@ -41,13 +41,6 @@ impl Face {
     pub fn center(&self) -> (f32, f32) {
         ((self.x0 + self.x1) * 0.5, (self.y0 + self.y1) * 0.5)
     }
-
-    /// Distance between the two eyes, in source pixels (a face-scale proxy).
-    #[must_use]
-    pub fn eye_distance(&self) -> f32 {
-        (self.landmarks[0].0 - self.landmarks[1].0)
-            .hypot(self.landmarks[0].1 - self.landmarks[1].1)
-    }
 }
 
 /// A square crop region for the landmark model, in source pixel coordinates.
