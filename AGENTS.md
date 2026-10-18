@@ -101,9 +101,12 @@ Style follows the user's `bevy_tut` project:
 ## Pipeline / architecture
 
 ```
-nokhwa (DirectShow, 320x240@60..120) → blazeface ONNX + 6D-pose ONNX via
-`ort` → One-Euro filter → output
+PS3 Eye (OV534 via libusb) → YuNet ONNX (face detection) → pose from eye/nose
+landmarks via `ort` → One-Euro filter → output
 ```
+
+(FaceMesh is kept as an optional inspection harness; the tracking path uses
+the detector's landmarks.)
 
 Output, in order of appearance:
 1. **MVP**: UDP → opentrack (which drives ETS2 via TrackIR protocol).
