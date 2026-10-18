@@ -276,11 +276,11 @@ fn preview_loop(eye: &Ps3Eye, width: usize, height: usize) -> Result<()> {
             log::info!("pitch_gain {:.1}", tuning.pitch_gain);
         }
         if window.is_key_pressed(minifb::Key::Period, minifb::KeyRepeat::No) {
-            tuning.deadzone = (tuning.deadzone + 0.1).min(5.0);
+            tuning.deadzone = (tuning.deadzone + 0.5).min(15.0);
             log::info!("deadzone {:.1}°", tuning.deadzone);
         }
         if window.is_key_pressed(minifb::Key::Comma, minifb::KeyRepeat::No) {
-            tuning.deadzone = (tuning.deadzone - 0.1).max(0.0);
+            tuning.deadzone = (tuning.deadzone - 0.5).max(0.0);
             log::info!("deadzone {:.1}°", tuning.deadzone);
         }
         if window.is_key_pressed(minifb::Key::M, minifb::KeyRepeat::No) {

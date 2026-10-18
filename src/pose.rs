@@ -79,9 +79,11 @@ impl Tuning {
     #[must_use]
     pub fn apply(&self, pose: Pose, neutral: Option<Pose>) -> Pose {
         let n = neutral.unwrap_or_default();
-        let mut yaw = apply_deadzone((pose.yaw - n.yaw) * self.yaw_gain, self.deadzone);
-        let mut pitch = apply_deadzone((pose.pitch - n.pitch) * self.pitch_gain, self.deadzone);
-        let mut roll = apply_deadzone((pose.roll - n.roll) * self.roll_gain, self.deadzone);
+        // Deadzone is applied in head-degrees (before gain), so it absorbs
+        // landmark noise around the neutral pose; gain then amplifies intent.
+        let mut yaw = apply_deadzone(pose.yaw - n.yaw, self.deadzone) * self.yaw_gain;
+        let mut pitch = apply_deadzone(pose.pitch - n.pitch, self.deadzone) * self.pitch_gain;
+        let mut roll = apply_deadzone(pose.roll - n.roll, self.deadzone) * self.roll_gain;
         if self.invert_yaw {
             yaw = -yaw;
         }
