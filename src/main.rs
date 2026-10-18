@@ -17,8 +17,10 @@ mod async_stream;
 mod bayer;
 mod camera;
 mod face;
+mod filter;
 mod font;
 mod landmark;
+mod output;
 mod ov534;
 mod pose;
 mod scanner;
@@ -211,6 +213,16 @@ fn preview_loop(eye: &Ps3Eye, width: usize, height: usize) -> Result<()> {
     let mut calib_samples: Vec<pose::Pose> = Vec::new();
     let mut tuning = pose::Tuning::default();
 
+    let udp = output::OpenTrack::connect(output::DEFAULT_PORT)?;
+    log::info!(
+        "sending pose to opentrack at 127.0.0.1:{} (FreePIE UDP receiver)",
+        output::DEFAULT_PORT
+    );
+    let mut euro_yaw = filter::OneEuro::new(1.0, 0.5, 1.0);
+    let mut euro_pitch = filter::OneEuro::new(1.0, 0.5, 1.0);
+    let mut euro_roll = filter::OneEuro::new(1.0, 0.5, 1.0);
+    let mut last_time = Instant::now();
+
     while window.is_open() && !window.is_key_down(minifb::Key::Escape) {
         let raw = eye.read_raw_frame().context("frame read failed")?;
         frames += 1;
@@ -371,6 +383,15 @@ fn preview_loop(eye: &Ps3Eye, width: usize, height: usize) -> Result<()> {
             }
 
             let shown = tuning.apply(pose, neutral);
+            let now = Instant::now();
+            let dt = (now - last_time).as_secs_f32();
+            last_time = now;
+            let filtered = pose::Pose {
+                yaw: euro_yaw.filter(shown.yaw, dt),
+                pitch: euro_pitch.filter(shown.pitch, dt),
+                roll: euro_roll.filter(shown.roll, dt),
+            };
+            let _ = udp.send(&filtered);
             let state = if calibrating.is_some() {
                 "CALIBRATING"
             } else if neutral.is_some() {
@@ -378,13 +399,13 @@ fn preview_loop(eye: &Ps3Eye, width: usize, height: usize) -> Result<()> {
             } else {
                 "UNCALIBRATED"
             };
-            draw_hud(&mut rgb, width, height, state, eye_dist, shown, &tuning);
+            draw_hud(&mut rgb, width, height, state, eye_dist, filtered, &tuning);
             if frames % TARGET_FPS as usize == 0 {
                 log::info!(
                     "{state:12} eye_dist={eye_dist:4.1}px  yaw {:>6.1}  pitch {:>6.1}  roll {:>6.1}  [gain {:.1}/{:.1} dz {:.1} sm {:.2}]",
-                    shown.yaw,
-                    shown.pitch,
-                    shown.roll,
+                    filtered.yaw,
+                    filtered.pitch,
+                    filtered.roll,
                     tuning.yaw_gain,
                     tuning.pitch_gain,
                     tuning.deadzone,
