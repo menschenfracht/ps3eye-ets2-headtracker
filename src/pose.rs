@@ -61,7 +61,7 @@ pub struct Tuning {
 impl Default for Tuning {
     fn default() -> Self {
         Self {
-            yaw_gain: 2.0,
+            yaw_gain: 1.7,
             pitch_gain: 2.0,
             roll_gain: 1.0,
             deadzone: 0.5,
