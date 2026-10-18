@@ -10,6 +10,7 @@ docs/*.jpg
 docs/*.jpeg
 docs/*.png
 docs/*.ppm
+docs/*.log
 
 # Downloaded archives
 *.zip

@@ -1,7 +1,8 @@
-//! BlazeFace short-range face detector on ONNX Runtime.
+//! YuNet face detector on ONNX Runtime.
 //!
-//! The model and its anchor layout come from MediaPipe's face detection
-//! graph (Apache-2.0); see `models/NOTICE.md`.
+//! YuNet (OpenCV Zoo, MIT-licensed) with the multi-scale decode from OpenCV's
+//! `FaceDetectorYN`; see `models/NOTICE.md`. The model has a fixed 640x640
+//! input, BGR, raw 0..255, and three anchor-free heads (strides 8, 16, 32).
 
 use std::path::Path;
 
@@ -11,18 +12,18 @@ use ort::session::builder::GraphOptimizationLevel;
 use ort::session::Session;
 use ort::value::Tensor;
 
-/// Square network input side, in pixels.
-pub const INPUT: usize = 128;
-/// Number of anchors the model predicts per image.
-const ANCHORS: usize = 896;
-/// Values per anchor: 4 box numbers followed by 6 keypoints (x, y each).
-const COORDS: usize = 16;
-/// Minimum sigmoid score to keep a detection.
-const MIN_SCORE: f32 = 0.5;
+/// Model input side, in pixels (fixed by the exported model).
+pub const INPUT: usize = 640;
+/// Feature-map strides and output-head suffixes.
+const STRIDES: [usize; 3] = [8, 16, 32];
+/// Landmarks per face: right eye, left eye, nose tip, right mouth, left mouth.
+pub const N_LANDMARKS: usize = 5;
+/// Minimum `sqrt(cls * obj)` score to keep a detection.
+const MIN_SCORE: f32 = 0.6;
 /// Overlap above which a lower-scoring box is dropped.
 const NMS_IOU: f32 = 0.3;
 
-/// A face found in the letterboxed network input, normalised to `0..=1`.
+/// A detected face in source pixel coordinates.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Face {
     pub x0: f32,
@@ -30,62 +31,93 @@ pub struct Face {
     pub x1: f32,
     pub y1: f32,
     pub score: f32,
-    /// Right eye, left eye, mouth centre, nose tip, left ear, right ear.
-    pub keypoints: [(f32, f32); 6],
+    /// Right eye, left eye, nose tip, right mouth corner, left mouth corner.
+    pub landmarks: [(f32, f32); N_LANDMARKS],
 }
 
-/// Letterbox mapping from the source frame to the network input.
-#[derive(Clone, Copy, Debug)]
-pub struct Letterbox {
-    scale: f32,
-    pad_x: f32,
-    pad_y: f32,
-}
-
-impl Letterbox {
-    /// Map a normalised network-input coordinate back to source pixels.
+impl Face {
+    /// Centre of the bounding box, in source pixels.
     #[must_use]
-    pub fn to_source(&self, x: f32, y: f32) -> (f32, f32) {
-        let side = INPUT as f32;
-        ((x * side - self.pad_x) / self.scale, (y * side - self.pad_y) / self.scale)
+    pub fn center(&self) -> (f32, f32) {
+        ((self.x0 + self.x1) * 0.5, (self.y0 + self.y1) * 0.5)
+    }
+
+    /// Image-left eye, image-right eye and nose tip, in the order the pose
+    /// expects. YuNet lists the person's right eye first (image-left).
+    #[must_use]
+    pub fn pose_points(&self) -> [(f32, f32); 3] {
+        [self.landmarks[0], self.landmarks[1], self.landmarks[2]]
     }
 }
 
-/// One square anchor: centre (normalised) and side length (normalised).
+/// A square crop region for the landmark model, in source pixel coordinates.
 #[derive(Clone, Copy, Debug)]
-struct Anchor {
-    cx: f32,
-    cy: f32,
-    size: f32,
+pub struct FaceRect {
+    pub cx: f32,
+    pub cy: f32,
+    pub half: f32,
+    /// Rotation (radians) that undoes the eye-line tilt for the crop.
+    pub rotation: f32,
+}
+
+/// Derive a square face crop from YuNet's landmarks (eyes and mouth corners).
+#[must_use]
+pub fn face_rect(face: &Face) -> FaceRect {
+    const EYE_TO_MOUTH_MIX: f32 = 0.1;
+    const EYE_TO_MOUTH_SCALE: f32 = 3.6;
+    const EYE_TO_EYE_SCALE: f32 = 4.0;
+
+    let left_eye = face.landmarks[1];
+    let right_eye = face.landmarks[0];
+    let mouth = (
+        (face.landmarks[3].0 + face.landmarks[4].0) * 0.5,
+        (face.landmarks[3].1 + face.landmarks[4].1) * 0.5,
+    );
+
+    let eye_center = (
+        (left_eye.0 + right_eye.0) * 0.5,
+        (left_eye.1 + right_eye.1) * 0.5,
+    );
+    let eye_to_eye = (right_eye.0 - left_eye.0, right_eye.1 - left_eye.1);
+    let eye_to_mouth = (mouth.0 - eye_center.0, mouth.1 - eye_center.1);
+
+    let cx = eye_center.0 + eye_to_mouth.0 * EYE_TO_MOUTH_MIX;
+    let cy = eye_center.1 + eye_to_mouth.1 * EYE_TO_MOUTH_MIX;
+
+    let eye_to_eye_norm = eye_to_eye.0.hypot(eye_to_eye.1);
+    let eye_to_mouth_norm = eye_to_mouth.0.hypot(eye_to_mouth.1);
+    let side = (eye_to_mouth_norm * EYE_TO_MOUTH_SCALE).max(eye_to_eye_norm * EYE_TO_EYE_SCALE);
+    let rotation = eye_to_eye.1.atan2(eye_to_eye.0);
+
+    FaceRect {
+        cx,
+        cy,
+        half: side * 0.5,
+        rotation,
+    }
 }
 
 pub struct FaceDetector {
     session: Session,
-    anchors: Vec<Anchor>,
 }
 
 impl FaceDetector {
     /// Load the detector from an ONNX file, sharing `env` with other sessions.
-    ///
-    /// `ort` allows a single [`Environment`] per process, so callers must build
-    /// one once and pass it here.
     pub fn load(model: &Path, env: &Environment) -> Result<Self> {
-        let mut builder = Session::builder(env)
-            .context("failed to create ONNX Runtime session builder")?;
+        let mut builder =
+            Session::builder(env).context("failed to create ONNX Runtime session builder")?;
         builder = builder
             .with_optimization_level(GraphOptimizationLevel::Level3)
             .map_err(|err| anyhow::anyhow!("failed to set graph optimization level: {err}"))?;
         let session = builder
             .commit_from_file(model)
             .with_context(|| format!("failed to load {}", model.display()))?;
-        let anchors = generate_anchors();
-        ensure!(anchors.len() == ANCHORS, "anchor count {} != {ANCHORS}", anchors.len());
-        Ok(Self { session, anchors })
+        Ok(Self { session })
     }
 
     /// Detect faces in an interleaved RGB8 frame of `width` x `height` pixels.
-    pub fn detect(&mut self, rgb: &[u8], width: usize, height: usize) -> Result<(Vec<Face>, Letterbox)> {
-        let (input, letterbox) = letterbox_nchw(rgb, width, height)?;
+    pub fn detect(&mut self, rgb: &[u8], width: usize, height: usize) -> Result<Vec<Face>> {
+        let (input, scale) = build_input(rgb, width, height)?;
         let tensor = Tensor::from_array(([1_usize, 3, INPUT, INPUT], input))
             .context("failed to build the input tensor")?;
         let outputs = self
@@ -93,45 +125,97 @@ impl FaceDetector {
             .run(ort::inputs!["input" => tensor])
             .context("face detector inference failed")?;
 
-        let (_, regressors) = outputs
-            .get("regressors")
-            .context("regressors output missing")?
-            .try_extract_tensor::<f32>()
-            .context("regressors output is not a float tensor")?;
-        let (_, scores) = outputs
-            .get("classificators")
-            .context("classificators output missing")?
-            .try_extract_tensor::<f32>()
-            .context("classificators output is not a float tensor")?;
-        ensure!(regressors.len() == ANCHORS * COORDS, "regressors have {} values", regressors.len());
-        ensure!(scores.len() == ANCHORS, "scores have {} values", scores.len());
+        let mut faces = Vec::new();
+        for &stride in &STRIDES {
+            let cls = output(&outputs, &format!("cls_{stride}"))?;
+            let obj = output(&outputs, &format!("obj_{stride}"))?;
+            let bbox = output(&outputs, &format!("bbox_{stride}"))?;
+            let kps = output(&outputs, &format!("kps_{stride}"))?;
+            decode_head(stride, cls, obj, bbox, kps, scale, &mut faces);
+        }
 
-        let faces = decode(regressors, scores, &self.anchors);
-        Ok((non_max_suppression(faces), letterbox))
+        Ok(non_max_suppression(faces))
     }
 }
 
-/// Resize to fit the square input (keeping aspect), pad with black, and
-/// normalise to `[-1, 1]` in NCHW order.
+/// Fetch a single f32 output tensor as a slice.
+fn output<'a>(outputs: &'a ort::session::SessionOutputs, name: &str) -> Result<&'a [f32]> {
+    Ok(outputs
+        .get(name)
+        .with_context(|| format!("output {name} missing"))?
+        .try_extract_tensor::<f32>()
+        .with_context(|| format!("output {name} is not a float tensor"))?
+        .1)
+}
+
+/// Decode one stride's head into `faces` (coordinates in source pixels).
 #[expect(
     clippy::indexing_slicing,
-    reason = "pixel offsets are within the validated frame and plane buffers"
+    reason = "indices are bounded by the feature-map dimensions derived from the model shapes"
 )]
-fn letterbox_nchw(rgb: &[u8], width: usize, height: usize) -> Result<(Vec<f32>, Letterbox)> {
+fn decode_head(
+    stride: usize,
+    cls: &[f32],
+    obj: &[f32],
+    bbox: &[f32],
+    kps: &[f32],
+    scale: f32,
+    faces: &mut Vec<Face>,
+) {
+    let grid = INPUT / stride;
+    if cls.len() < grid * grid || obj.len() < grid * grid || bbox.len() < grid * grid * 4 || kps.len() < grid * grid * 10 {
+        return;
+    }
+    let stride_f = stride as f32;
+    for r in 0..grid {
+        for c in 0..grid {
+            let idx = r * grid + c;
+            let cls_s = cls[idx].clamp(0.0, 1.0);
+            let obj_s = obj[idx].clamp(0.0, 1.0);
+            let score = (cls_s * obj_s).sqrt();
+            if score < MIN_SCORE {
+                continue;
+            }
+            let b = &bbox[idx * 4..idx * 4 + 4];
+            let cx = (c as f32 + b[0]) * stride_f;
+            let cy = (r as f32 + b[1]) * stride_f;
+            let w = b[2].exp() * stride_f;
+            let h = b[3].exp() * stride_f;
+
+            let mut landmarks = [(0.0_f32, 0.0_f32); N_LANDMARKS];
+            for (n, lm) in landmarks.iter_mut().enumerate() {
+                let kx = kps[idx * 10 + 2 * n];
+                let ky = kps[idx * 10 + 2 * n + 1];
+                *lm = ((c as f32 + kx) * stride_f / scale, (r as f32 + ky) * stride_f / scale);
+            }
+
+            faces.push(Face {
+                x0: (cx - w * 0.5) / scale,
+                y0: (cy - h * 0.5) / scale,
+                x1: (cx + w * 0.5) / scale,
+                y1: (cy + h * 0.5) / scale,
+                score,
+                landmarks,
+            });
+        }
+    }
+}
+
+/// Letterbox `rgb` into the model's fixed square input as BGR, raw 0..255, NCHW,
+/// placed at the top-left (matching OpenCV's `padWithDivisor`). Returns the
+/// input tensor and the scale used to map coordinates back to source pixels.
+#[expect(
+    clippy::indexing_slicing,
+    reason = "source and destination offsets are within the validated buffers"
+)]
+fn build_input(rgb: &[u8], width: usize, height: usize) -> Result<(Vec<f32>, f32)> {
     ensure!(rgb.len() == width * height * 3, "rgb buffer size mismatch");
-    let side = INPUT as f32;
-    let long = width.max(height) as f32;
-    let scale = side / long;
-    let new_w = (width as f32 * scale).round() as usize;
-    let new_h = (height as f32 * scale).round() as usize;
-    let pad_x = ((INPUT - new_w) / 2) as f32;
-    let pad_y = ((INPUT - new_h) / 2) as f32;
-    let letterbox = Letterbox { scale, pad_x, pad_y };
+    let scale = (INPUT as f32 / width as f32).min(INPUT as f32 / height as f32);
+    let new_w = ((width as f32 * scale).round() as usize).min(INPUT);
+    let new_h = ((height as f32 * scale).round() as usize).min(INPUT);
 
     let plane = INPUT * INPUT;
-    let mut out = vec![-1.0_f32; 3 * plane];
-    let pad_x = pad_x as usize;
-    let pad_y = pad_y as usize;
+    let mut out = vec![0.0_f32; 3 * plane];
     for y in 0..new_h {
         let sy = ((y as f32 + 0.5) / scale).floor() as usize;
         let sy = sy.min(height - 1);
@@ -139,89 +223,14 @@ fn letterbox_nchw(rgb: &[u8], width: usize, height: usize) -> Result<(Vec<f32>, 
             let sx = ((x as f32 + 0.5) / scale).floor() as usize;
             let sx = sx.min(width - 1);
             let src = (sy * width + sx) * 3;
-            let dst = (pad_y + y) * INPUT + pad_x + x;
-            for c in 0..3 {
-                let v = f32::from(rgb[src + c]) / 127.5 - 1.0;
-                out[c * plane + dst] = v;
-            }
+            let dst = y * INPUT + x;
+            // RGB -> BGR, raw 0..255.
+            out[dst] = f32::from(rgb[src + 2]);
+            out[plane + dst] = f32::from(rgb[src + 1]);
+            out[2 * plane + dst] = f32::from(rgb[src]);
         }
     }
-    Ok((out, letterbox))
-}
-
-/// MediaPipe SSD anchors for the short-range model: strides 8, 16, 16, 16,
-/// two square anchors per cell (scale and interpolated scale), row-major.
-#[expect(
-    clippy::indexing_slicing,
-    reason = "layer and layer + 1 are both within the scales table by construction"
-)]
-fn generate_anchors() -> Vec<Anchor> {
-    const STRIDES: [usize; 4] = [8, 16, 16, 16];
-    const MIN_SCALE: f32 = 0.148_437_5;
-    const MAX_SCALE: f32 = 0.75;
-    let layers = STRIDES.len();
-
-    let mut scales: Vec<f32> = (0..layers)
-        .map(|i| MIN_SCALE + (MAX_SCALE - MIN_SCALE) * i as f32 / (layers - 1) as f32)
-        .collect();
-    scales.push(1.0);
-
-    let mut anchors = Vec::with_capacity(ANCHORS);
-    for (layer, &stride) in STRIDES.iter().enumerate() {
-        let grid = INPUT.div_ceil(stride);
-        let scale = scales[layer];
-        let interpolated = (scale * scales[layer + 1]).sqrt();
-        for y in 0..grid {
-            for x in 0..grid {
-                let cx = (x as f32 + 0.5) / grid as f32;
-                let cy = (y as f32 + 0.5) / grid as f32;
-                anchors.push(Anchor { cx, cy, size: scale });
-                anchors.push(Anchor { cx, cy, size: interpolated });
-            }
-        }
-    }
-    anchors
-}
-
-fn sigmoid(x: f32) -> f32 {
-    1.0 / (1.0 + (-x.clamp(-100.0, 100.0)).exp())
-}
-
-#[expect(
-    clippy::indexing_slicing,
-    reason = "score index matches anchors; regressor slice is a fixed COORDS-length window"
-)]
-fn decode(regressors: &[f32], scores: &[f32], anchors: &[Anchor]) -> Vec<Face> {
-    let side = INPUT as f32;
-    let mut faces = Vec::new();
-    for (i, anchor) in anchors.iter().enumerate() {
-        let score = sigmoid(scores[i]);
-        if score < MIN_SCORE {
-            continue;
-        }
-        let Some(r) = regressors.get(i * COORDS..(i + 1) * COORDS) else {
-            continue;
-        };
-        let cx = r[0] / side * anchor.size + anchor.cx;
-        let cy = r[1] / side * anchor.size + anchor.cy;
-        let w = r[2] / side * anchor.size;
-        let h = r[3] / side * anchor.size;
-        let mut keypoints = [(0.0_f32, 0.0_f32); 6];
-        for (k, point) in keypoints.iter_mut().enumerate() {
-            let px = r[4 + 2 * k] / side * anchor.size + anchor.cx;
-            let py = r[5 + 2 * k] / side * anchor.size + anchor.cy;
-            *point = (px, py);
-        }
-        faces.push(Face {
-            x0: cx - w / 2.0,
-            y0: cy - h / 2.0,
-            x1: cx + w / 2.0,
-            y1: cy + h / 2.0,
-            score,
-            keypoints,
-        });
-    }
-    faces
+    Ok((out, scale))
 }
 
 fn iou(a: &Face, b: &Face) -> f32 {
