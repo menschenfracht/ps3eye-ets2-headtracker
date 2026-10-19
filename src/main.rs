@@ -10,6 +10,8 @@
 
 use std::io::Write as _;
 use std::path::Path;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
@@ -43,6 +45,8 @@ const SAMPLE_EVERY: usize = 250;
 const DETECTOR_MODEL: &str = "models/face_detection_yunet.onnx";
 /// Landmark model, relative to the working directory.
 const LANDMARK_MODEL: &str = "models/face_landmark_192.onnx";
+/// Creating this file stops the headless `--track` loop cleanly.
+const STOP_FILE: &str = "target/stop";
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Mode {
@@ -313,23 +317,37 @@ fn preview_loop(eye: &Ps3Eye, width: usize, height: usize) -> Result<()> {
 /// Headless tracker: pose → opentrack over UDP, with no window.
 ///
 /// Looks straight ahead at startup; recenters automatically after 3 s so the
-/// neutral pose is zero. Stop with Ctrl+C.
+/// neutral pose is zero. Stop cleanly with **Ctrl+C**, or by creating the
+/// `target/stop` file — either way the camera stream is stopped before exit.
 fn track_loop(eye: &Ps3Eye, width: usize, height: usize) -> Result<()> {
     let environment = ort::init()
         .with_telemetry(false)
         .build()
         .context("failed to initialise ONNX Runtime")?;
     let mut tracker = Tracker::load(Path::new(DETECTOR_MODEL), &environment, output::DEFAULT_PORT)?;
+
+    // Clean shutdown: Ctrl+C sets the flag, then the loop returns and the
+    // caller stops the camera stream.
+    let stop = Arc::new(AtomicBool::new(false));
+    ctrlc::set_handler({
+        let stop = Arc::clone(&stop);
+        move || stop.store(true, Ordering::SeqCst)
+    })
+    .context("failed to install the Ctrl+C handler")?;
+
+    let stop_file = Path::new(STOP_FILE);
+    let _ = std::fs::remove_file(stop_file);
     log::info!(
         "tracking headless; pose → opentrack at 127.0.0.1:{}",
         output::DEFAULT_PORT
     );
-    log::info!("look straight ahead; recentering in 3 s (Ctrl+C to stop)");
+    log::info!("look straight ahead; recentering in 3 s");
+    log::info!("stop cleanly with Ctrl+C or by creating '{STOP_FILE}'");
 
     let started = Instant::now();
     let mut recentered = false;
     let mut frames: usize = 0;
-    loop {
+    while !stop.load(Ordering::SeqCst) && !stop_file.exists() {
         let raw = eye.read_raw_frame().context("frame read failed")?;
         frames += 1;
         let mut rgb = vec![0_u8; width * height * 3];
@@ -352,6 +370,9 @@ fn track_loop(eye: &Ps3Eye, width: usize, height: usize) -> Result<()> {
             }
         }
     }
+
+    log::info!("stopping; releasing the camera");
+    Ok(())
 }
 
 /// Draw the outline of an ellipse (the head-position guide).
