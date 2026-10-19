@@ -4,7 +4,8 @@
 //! - (default) stream the camera and report the measured frame rate;
 //! - `--detect` run the face detector headless and save annotated samples;
 //! - `--capture` save clean (unannotated) samples for offline analysis;
-//! - `--preview` the simple tracker: detection keypoints → pose, live overlay;
+//! - `--preview` the tracker with a live overlay and tuning keys;
+//! - `--track` the tracker headless: pose → opentrack over UDP, no window;
 //! - `--facemesh` the FaceMesh inspection harness: crop, landmarks, score.
 
 use std::io::Write as _;
@@ -24,10 +25,12 @@ mod output;
 mod ov534;
 mod pose;
 mod scanner;
+mod tracker;
 
 use camera::{Ps3Eye, Resolution};
 use face::FaceDetector;
 use landmark::FaceMesh;
+use tracker::Tracker;
 
 /// Stream mode under test (VGA 640x480 at 60 fps: better exposure/quality).
 const RESOLUTION: Resolution = Resolution::Vga;
@@ -47,6 +50,7 @@ enum Mode {
     Detect,
     Capture,
     Preview,
+    Track,
     Facemesh,
 }
 
@@ -70,6 +74,7 @@ fn main() -> Result<()> {
         Mode::Detect => detect_loop(&eye, width, height),
         Mode::Capture => capture_loop(&eye, width, height),
         Mode::Preview => preview_loop(&eye, width, height),
+        Mode::Track => track_loop(&eye, width, height),
         Mode::Facemesh => facemesh_loop(&eye, width, height),
     }?;
 
@@ -81,6 +86,8 @@ fn parse_mode() -> Mode {
     let args: Vec<String> = std::env::args().collect();
     if args.iter().any(|a| a == "--preview") {
         Mode::Preview
+    } else if args.iter().any(|a| a == "--track") {
+        Mode::Track
     } else if args.iter().any(|a| a == "--facemesh") {
         Mode::Facemesh
     } else if args.iter().any(|a| a == "--capture") {
@@ -184,10 +191,11 @@ fn preview_loop(eye: &Ps3Eye, width: usize, height: usize) -> Result<()> {
         .with_telemetry(false)
         .build()
         .context("failed to initialise ONNX Runtime")?;
-    let mut detector = FaceDetector::load(Path::new(DETECTOR_MODEL), &environment)?;
+    let mut tracker = Tracker::load(Path::new(DETECTOR_MODEL), &environment, output::DEFAULT_PORT)?;
+    log::info!("sending pose to opentrack at 127.0.0.1:{}", output::DEFAULT_PORT);
 
     let mut window = minifb::Window::new(
-        "PS3 Eye head tracker (keypoints)",
+        "PS3 Eye head tracker",
         width,
         height,
         minifb::WindowOptions {
@@ -197,31 +205,8 @@ fn preview_loop(eye: &Ps3Eye, width: usize, height: usize) -> Result<()> {
     )
     .context("failed to open the preview window")?;
 
-    // Oval guide disabled while tuning.
-    // let (cx, cy) = (width as f32 * 0.5, height as f32 * 0.5);
-    // let (mut rx, mut ry) = (110.0_f32, 140.0_f32);
-
     let mut buffer = vec![0_u32; width * height];
     let mut frames: usize = 0;
-    let mut prev_center: Option<(f32, f32)> = None;
-    let mut smoothed_lm: Option<[(f32, f32); 5]> = None;
-    let mut smoothed_box: Option<(f32, f32, f32, f32)> = None;
-    let mut ref_eye: f32 = 0.0;
-    let mut last_pose: Option<pose::Pose> = None;
-    let mut neutral: Option<pose::Pose> = None;
-    let mut calibrating: Option<Instant> = None;
-    let mut calib_samples: Vec<pose::Pose> = Vec::new();
-    let mut tuning = pose::Tuning::default();
-
-    let udp = output::OpenTrack::connect(output::DEFAULT_PORT)?;
-    log::info!(
-        "sending pose to opentrack at 127.0.0.1:{} (FreePIE UDP receiver)",
-        output::DEFAULT_PORT
-    );
-    let mut euro_yaw = filter::OneEuro::new(1.0, 0.5, 1.0);
-    let mut euro_pitch = filter::OneEuro::new(1.0, 0.5, 1.0);
-    let mut euro_roll = filter::OneEuro::new(1.0, 0.5, 1.0);
-    let mut last_time = Instant::now();
 
     while window.is_open() && !window.is_key_down(minifb::Key::Escape) {
         let raw = eye.read_raw_frame().context("frame read failed")?;
@@ -229,187 +214,90 @@ fn preview_loop(eye: &Ps3Eye, width: usize, height: usize) -> Result<()> {
         let mut rgb = vec![0_u8; width * height * 3];
         bayer::bayer_grbg_to_rgb(&raw, width, height, &mut rgb);
 
-        // Calibration disabled while tuning; uncomment to re-enable.
-        // if window.is_key_down(minifb::Key::F) && calibrating.is_none() {
-        //     calibrating = Some(Instant::now());
-        //     calib_samples.clear();
-        //     log::info!("calibration started — hold still for 10 s");
-        // }
-
-        // Single-press recenter: capture the current pose as neutral.
+        // Recenter: capture the current pose as the neutral reference.
         if window.is_key_pressed(minifb::Key::R, minifb::KeyRepeat::No) {
-            if let Some(p) = last_pose {
-                neutral = Some(p);
-                log::info!(
-                    "recentered: neutral yaw={:+.1}° pitch={:+.1}° roll={:+.1}°",
-                    p.yaw,
-                    p.pitch,
-                    p.roll
-                );
-            }
+            tracker.recenter();
+            log::info!("recentered");
         }
-
-        // Oval resize disabled while tuning.
-        // if window.is_key_pressed(minifb::Key::Equal, minifb::KeyRepeat::No)
-        //     || window.is_key_pressed(minifb::Key::NumPadPlus, minifb::KeyRepeat::No)
-        // {
-        //     rx *= 1.1;
-        //     ry *= 1.1;
-        //     log::info!("oval enlarged to {rx:.0} x {ry:.0} px");
-        // }
-        // if window.is_key_pressed(minifb::Key::Minus, minifb::KeyRepeat::No)
-        //     || window.is_key_pressed(minifb::Key::NumPadMinus, minifb::KeyRepeat::No)
-        // {
-        //     rx = (rx / 1.1).max(30.0_f32);
-        //     ry = (ry / 1.1).max(40.0_f32);
-        //     log::info!("oval shrunk to {rx:.0} x {ry:.0} px");
-        // }
-
-        // Oval guide disabled while tuning.
-        // let (or, og, ob) = if calibrating.is_some() {
-        //     (255_u8, 165, 0)
-        // } else {
-        //     (0_u8, 255, 0)
-        // };
-        // draw_oval(&mut rgb, width, height, cx, cy, rx, ry, or, og, ob);
 
         // Tuning keys: [ ] yaw gain, ; ' pitch gain, , . deadzone,
         // n m smoothing, i/o/p invert yaw/pitch/roll.
         if window.is_key_pressed(minifb::Key::RightBracket, minifb::KeyRepeat::No) {
-            tuning.yaw_gain = (tuning.yaw_gain + 0.1).min(6.0);
-            log::info!("yaw_gain {:.1}", tuning.yaw_gain);
+            tracker.tuning.yaw_gain = (tracker.tuning.yaw_gain + 0.1).min(6.0);
+            log::info!("yaw_gain {:.1}", tracker.tuning.yaw_gain);
         }
         if window.is_key_pressed(minifb::Key::LeftBracket, minifb::KeyRepeat::No) {
-            tuning.yaw_gain = (tuning.yaw_gain - 0.1).max(0.5);
-            log::info!("yaw_gain {:.1}", tuning.yaw_gain);
+            tracker.tuning.yaw_gain = (tracker.tuning.yaw_gain - 0.1).max(0.5);
+            log::info!("yaw_gain {:.1}", tracker.tuning.yaw_gain);
         }
         if window.is_key_pressed(minifb::Key::Apostrophe, minifb::KeyRepeat::No) {
-            tuning.pitch_gain = (tuning.pitch_gain + 0.1).min(6.0);
-            log::info!("pitch_gain {:.1}", tuning.pitch_gain);
+            tracker.tuning.pitch_gain = (tracker.tuning.pitch_gain + 0.1).min(6.0);
+            log::info!("pitch_gain {:.1}", tracker.tuning.pitch_gain);
         }
         if window.is_key_pressed(minifb::Key::Semicolon, minifb::KeyRepeat::No) {
-            tuning.pitch_gain = (tuning.pitch_gain - 0.1).max(0.5);
-            log::info!("pitch_gain {:.1}", tuning.pitch_gain);
+            tracker.tuning.pitch_gain = (tracker.tuning.pitch_gain - 0.1).max(0.5);
+            log::info!("pitch_gain {:.1}", tracker.tuning.pitch_gain);
         }
         if window.is_key_pressed(minifb::Key::Period, minifb::KeyRepeat::No) {
-            tuning.deadzone = (tuning.deadzone + 0.5).min(15.0);
-            log::info!("deadzone {:.1}°", tuning.deadzone);
+            tracker.tuning.deadzone = (tracker.tuning.deadzone + 0.5).min(15.0);
+            log::info!("deadzone {:.1}", tracker.tuning.deadzone);
         }
         if window.is_key_pressed(minifb::Key::Comma, minifb::KeyRepeat::No) {
-            tuning.deadzone = (tuning.deadzone - 0.5).max(0.0);
-            log::info!("deadzone {:.1}°", tuning.deadzone);
+            tracker.tuning.deadzone = (tracker.tuning.deadzone - 0.5).max(0.0);
+            log::info!("deadzone {:.1}", tracker.tuning.deadzone);
         }
         if window.is_key_pressed(minifb::Key::M, minifb::KeyRepeat::No) {
-            tuning.smoothing = (tuning.smoothing + 0.05).min(1.0);
-            log::info!("smoothing {:.2}", tuning.smoothing);
+            tracker.tuning.smoothing = (tracker.tuning.smoothing + 0.05).min(1.0);
+            log::info!("smoothing {:.2}", tracker.tuning.smoothing);
         }
         if window.is_key_pressed(minifb::Key::N, minifb::KeyRepeat::No) {
-            tuning.smoothing = (tuning.smoothing - 0.05).max(0.05);
-            log::info!("smoothing {:.2}", tuning.smoothing);
+            tracker.tuning.smoothing = (tracker.tuning.smoothing - 0.05).max(0.05);
+            log::info!("smoothing {:.2}", tracker.tuning.smoothing);
         }
         if window.is_key_pressed(minifb::Key::I, minifb::KeyRepeat::No) {
-            tuning.invert_yaw = !tuning.invert_yaw;
-            log::info!("invert_yaw {}", tuning.invert_yaw);
+            tracker.tuning.invert_yaw = !tracker.tuning.invert_yaw;
+            log::info!("invert_yaw {}", tracker.tuning.invert_yaw);
         }
         if window.is_key_pressed(minifb::Key::O, minifb::KeyRepeat::No) {
-            tuning.invert_pitch = !tuning.invert_pitch;
-            log::info!("invert_pitch {}", tuning.invert_pitch);
+            tracker.tuning.invert_pitch = !tracker.tuning.invert_pitch;
+            log::info!("invert_pitch {}", tracker.tuning.invert_pitch);
         }
         if window.is_key_pressed(minifb::Key::P, minifb::KeyRepeat::No) {
-            tuning.invert_roll = !tuning.invert_roll;
-            log::info!("invert_roll {}", tuning.invert_roll);
+            tracker.tuning.invert_roll = !tracker.tuning.invert_roll;
+            log::info!("invert_roll {}", tracker.tuning.invert_roll);
         }
 
-        let faces = detector.detect(&rgb, width, height)?;
-        if let Some(face) = select_face(&faces, prev_center) {
-            let eye = face.eye_distance();
-            ref_eye = (ref_eye * 0.999).max(eye);
-            // Freeze when the detected "face" is much smaller than the tracked
-            // one: at extreme angles YuNet sees only a sub-region.
-            if eye >= 0.6 * ref_eye {
-                let landmarks = match smoothed_lm {
-                    Some(prev) => blend_landmarks(prev, face.landmarks, tuning.smoothing),
-                    None => face.landmarks,
-                };
-                smoothed_lm = Some(landmarks);
+        if let Some(frame) = tracker.process(&rgb, width, height)? {
+            draw_rect(&mut rgb, width, height, bx(frame.box_.0), bx(frame.box_.1), bx(frame.box_.2), bx(frame.box_.3), 255, 0, 0);
 
-                let raw_box = (face.x0, face.y0, face.x1, face.y1);
-                let box_ = match smoothed_box {
-                    Some(prev) => blend_box(prev, raw_box, tuning.smoothing),
-                    None => raw_box,
-                };
-                smoothed_box = Some(box_);
-                prev_center = Some(face.center());
-            }
-        }
-
-        // Draw the overlay from the (possibly frozen) smoothed values.
-        if let (Some(landmarks), Some(box_)) = (smoothed_lm, smoothed_box) {
-            draw_rect(&mut rgb, width, height, bx(box_.0), bx(box_.1), bx(box_.2), bx(box_.3), 255, 0, 0);
-
-            let [eye_left, eye_right, nose, _mouth_r, _mouth_l] = landmarks;
-            let eye_dist = (eye_right.0 - eye_left.0).hypot(eye_right.1 - eye_left.1);
-
-            // Eye line (roll) in yellow, nose direction (yaw/pitch) in cyan.
+            let [eye_left, eye_right, nose, _mouth_r, _mouth_l] = frame.landmarks;
             draw_line(&mut rgb, width, height, eye_left, eye_right, 255, 255, 0);
             let eye_mid = (
                 (eye_left.0 + eye_right.0) * 0.5,
                 (eye_left.1 + eye_right.1) * 0.5,
             );
             draw_line(&mut rgb, width, height, eye_mid, nose, 0, 255, 255);
-
-            for point in landmarks {
+            for point in frame.landmarks {
                 draw_dot(&mut rgb, width, height, point.0, point.1, 0, 255, 0);
             }
 
-            let pose = pose::estimate(&[eye_left, eye_right, nose]);
-            last_pose = Some(pose);
-
-            if let Some(start) = calibrating {
-                calib_samples.push(pose);
-                if start.elapsed() >= Duration::from_secs(10) {
-                    neutral = Some(mean_pose(&calib_samples));
-                    calibrating = None;
-                    if let Some(n) = neutral {
-                        log::info!(
-                            "calibration done: neutral yaw={:+.1}° pitch={:+.1}° roll={:+.1}° ({} samples)",
-                            n.yaw,
-                            n.pitch,
-                            n.roll,
-                            calib_samples.len()
-                        );
-                    }
-                }
-            }
-
-            let shown = tuning.apply(pose, neutral);
-            let now = Instant::now();
-            let dt = (now - last_time).as_secs_f32();
-            last_time = now;
-            let filtered = pose::Pose {
-                yaw: euro_yaw.filter(shown.yaw, dt),
-                pitch: euro_pitch.filter(shown.pitch, dt),
-                roll: euro_roll.filter(shown.roll, dt),
-            };
-            let _ = udp.send(&filtered);
-            let state = if calibrating.is_some() {
-                "CALIBRATING"
-            } else if neutral.is_some() {
+            let state = if tracker.neutral.is_some() {
                 "TRACKING"
             } else {
                 "UNCALIBRATED"
             };
-            draw_hud(&mut rgb, width, height, state, eye_dist, filtered, &tuning);
+            draw_hud(&mut rgb, width, height, state, frame.eye_dist, frame.pose, &tracker.tuning);
             if frames % TARGET_FPS as usize == 0 {
                 log::info!(
-                    "{state:12} eye_dist={eye_dist:4.1}px  yaw {:>6.1}  pitch {:>6.1}  roll {:>6.1}  [gain {:.1}/{:.1} dz {:.1} sm {:.2}]",
-                    filtered.yaw,
-                    filtered.pitch,
-                    filtered.roll,
-                    tuning.yaw_gain,
-                    tuning.pitch_gain,
-                    tuning.deadzone,
-                    tuning.smoothing
+                    "{state:12} eye_dist={:4.1}px  yaw {:>6.1}  pitch {:>6.1}  roll {:>6.1}  [gain {:.1}/{:.1} dz {:.1} sm {:.2}]",
+                    frame.eye_dist,
+                    frame.pose.yaw,
+                    frame.pose.pitch,
+                    frame.pose.roll,
+                    tracker.tuning.yaw_gain,
+                    tracker.tuning.pitch_gain,
+                    tracker.tuning.deadzone,
+                    tracker.tuning.smoothing
                 );
             }
         }
@@ -422,73 +310,47 @@ fn preview_loop(eye: &Ps3Eye, width: usize, height: usize) -> Result<()> {
     Ok(())
 }
 
-/// Pick the largest face (the user's), using the previous centre only as a
-/// tie-break. Sub-region false detections are always smaller, so this rejects
-/// them outright.
-fn select_face<'a>(faces: &'a [face::Face], prev_center: Option<(f32, f32)>) -> Option<&'a face::Face> {
-    let max_area = faces.iter().map(box_area).fold(0.0_f32, f32::max);
-    if max_area <= 0.0 {
-        return None;
-    }
-    let candidates: Vec<&face::Face> = faces
-        .iter()
-        .filter(|f| box_area(f) >= 0.8 * max_area)
-        .collect();
-    let Some((px, py)) = prev_center else {
-        return candidates.first().copied();
-    };
-    candidates.into_iter().min_by(|a, b| {
-        let (ax, ay) = a.center();
-        let (bx, by) = b.center();
-        (ax - px).hypot(ay - py).total_cmp(&(bx - px).hypot(by - py))
-    })
-}
+/// Headless tracker: pose → opentrack over UDP, with no window.
+///
+/// Looks straight ahead at startup; recenters automatically after 3 s so the
+/// neutral pose is zero. Stop with Ctrl+C.
+fn track_loop(eye: &Ps3Eye, width: usize, height: usize) -> Result<()> {
+    let environment = ort::init()
+        .with_telemetry(false)
+        .build()
+        .context("failed to initialise ONNX Runtime")?;
+    let mut tracker = Tracker::load(Path::new(DETECTOR_MODEL), &environment, output::DEFAULT_PORT)?;
+    log::info!(
+        "tracking headless; pose → opentrack at 127.0.0.1:{}",
+        output::DEFAULT_PORT
+    );
+    log::info!("look straight ahead; recentering in 3 s (Ctrl+C to stop)");
 
-/// Bounding-box area.
-fn box_area(f: &face::Face) -> f32 {
-    (f.x1 - f.x0).max(0.0) * (f.y1 - f.y0).max(0.0)
-}
+    let started = Instant::now();
+    let mut recentered = false;
+    let mut frames: usize = 0;
+    loop {
+        let raw = eye.read_raw_frame().context("frame read failed")?;
+        frames += 1;
+        let mut rgb = vec![0_u8; width * height * 3];
+        bayer::bayer_grbg_to_rgb(&raw, width, height, &mut rgb);
 
-/// Exponential blend of two landmark sets (frame-to-frame smoothing).
-fn blend_landmarks(prev: [(f32, f32); 5], cur: [(f32, f32); 5], alpha: f32) -> [(f32, f32); 5] {
-    let mut out = cur;
-    for (o, (&p, &c)) in out.iter_mut().zip(prev.iter().zip(cur.iter())) {
-        *o = (p.0 + (c.0 - p.0) * alpha, p.1 + (c.1 - p.1) * alpha);
-    }
-    out
-}
-
-/// Exponential blend of two bounding boxes `(x0, y0, x1, y1)`.
-fn blend_box(
-    prev: (f32, f32, f32, f32),
-    cur: (f32, f32, f32, f32),
-    alpha: f32,
-) -> (f32, f32, f32, f32) {
-    (
-        prev.0 + (cur.0 - prev.0) * alpha,
-        prev.1 + (cur.1 - prev.1) * alpha,
-        prev.2 + (cur.2 - prev.2) * alpha,
-        prev.3 + (cur.3 - prev.3) * alpha,
-    )
-}
-
-/// Mean of a set of pose samples.
-fn mean_pose(samples: &[pose::Pose]) -> pose::Pose {
-    if samples.is_empty() {
-        return pose::Pose::default();
-    }
-    let n = samples.len() as f32;
-    let sum = samples
-        .iter()
-        .fold(pose::Pose::default(), |acc, p| pose::Pose {
-            yaw: acc.yaw + p.yaw,
-            pitch: acc.pitch + p.pitch,
-            roll: acc.roll + p.roll,
-        });
-    pose::Pose {
-        yaw: sum.yaw / n,
-        pitch: sum.pitch / n,
-        roll: sum.roll / n,
+        if let Some(frame) = tracker.process(&rgb, width, height)? {
+            if !recentered && started.elapsed() >= Duration::from_secs(3) {
+                tracker.recenter();
+                recentered = true;
+                log::info!("recentered");
+            }
+            if frames % TARGET_FPS as usize == 0 {
+                log::info!(
+                    "eye_dist={:4.1}px  yaw {:>6.1}  pitch {:>6.1}  roll {:>6.1}",
+                    frame.eye_dist,
+                    frame.pose.yaw,
+                    frame.pose.pitch,
+                    frame.pose.roll
+                );
+            }
+        }
     }
 }
 
