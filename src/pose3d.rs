@@ -34,6 +34,10 @@ pub fn cloud(landmarks: &[Landmark]) -> Vec<Vector3<f32>> {
 /// Rotation `R` with `current ≈ R * reference` (Kabsch), or `None` when there
 /// are too few points or the decomposition fails.
 #[must_use]
+#[expect(
+    clippy::indexing_slicing,
+    reason = "correction is a fixed 3x3 matrix and (2, 2) is in bounds"
+)]
 pub fn rotation(current: &[Vector3<f32>], reference: &[Vector3<f32>]) -> Option<Matrix3<f32>> {
     if current.len() != reference.len() || current.len() < 3 {
         return None;
@@ -62,6 +66,10 @@ pub fn rotation(current: &[Vector3<f32>], reference: &[Vector3<f32>]) -> Option<
 /// Extract `(yaw, pitch, roll)` in degrees from a rotation matrix built as
 /// `Ry(yaw) * Rx(pitch) * Rz(roll)`.
 #[must_use]
+#[expect(
+    clippy::indexing_slicing,
+    reason = "r is a fixed 3x3 matrix; the indices are in bounds"
+)]
 pub fn angles(r: &Matrix3<f32>) -> (f32, f32, f32) {
     let pitch = (-r[(1, 2)]).asin().to_degrees();
     let yaw = r[(0, 2)].atan2(r[(2, 2)]).to_degrees();
