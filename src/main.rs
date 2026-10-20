@@ -38,7 +38,7 @@ use tracker::Tracker;
 
 /// Stream mode under test (VGA 640x480 at 60 fps: better exposure/quality).
 const RESOLUTION: Resolution = Resolution::Vga;
-const TARGET_FPS: u16 = 60;
+const TARGET_FPS: u16 = 30;
 /// Duration of the headless `--detect`/`--capture` benches.
 const RUN_FOR: Duration = Duration::from_secs(10);
 /// Save one sample frame every this many frames.
@@ -65,9 +65,15 @@ const BTN_Y: usize = 34;
 const RECENTER_X: usize = 12;
 const QUIT_X: usize = 132;
 
+/// Every cue is one of these two tones, shared by every mode: startup and
+/// recenter differ in pitch, but all recenters sound identical no matter how
+/// they were triggered (auto, global hotkey, panel, or preview key).
+const BEEP_START: (u32, u32) = (1000, 250);
+const BEEP_RECENTER: (u32, u32) = (1500, 100);
+
 /// Short audible cue (Windows `Beep`, falling back to the system sound).
 #[cfg(windows)]
-fn beep(frequency: u32, millis: u32) {
+fn beep((frequency, millis): (u32, u32)) {
     // SAFETY: `Beep`/`MessageBeep` have no memory-safety requirements.
     let ok = unsafe { Beep(frequency, millis) };
     if ok == 0 {
@@ -79,7 +85,7 @@ fn beep(frequency: u32, millis: u32) {
 
 /// No-op on non-Windows targets.
 #[cfg(not(windows))]
-fn beep(_frequency: u32, _millis: u32) {}
+fn beep(_tone: (u32, u32)) {}
 
 #[cfg(windows)]
 unsafe extern "system" {
@@ -322,6 +328,7 @@ fn preview_loop(eye: &Ps3Eye, width: usize, height: usize) -> Result<()> {
         if window.is_key_pressed(minifb::Key::R, minifb::KeyRepeat::No) {
             tracker.recenter();
             log::info!("recentered");
+            beep(BEEP_RECENTER);
         }
 
         // Tuning keys: [ ] yaw gain, ; ' pitch gain, , . deadzone,
@@ -378,6 +385,7 @@ fn preview_loop(eye: &Ps3Eye, width: usize, height: usize) -> Result<()> {
                 "pose {} (recentered)",
                 if tracker.use_3d { "3D" } else { "2D" }
             );
+            beep(BEEP_RECENTER);
         }
 
         if let Some(frame) = tracker.process(&rgb, width, height)? {
@@ -467,7 +475,7 @@ fn track_loop(eye: &Ps3Eye, width: usize, height: usize) -> Result<()> {
     );
     log::info!("look straight ahead; recentering in 3 s");
     log::info!("stop with Ctrl+C or the control panel; Ctrl+Alt+R recenters");
-    beep(1000, 250);
+    beep(BEEP_START);
 
     // Ctrl+Alt+R recenters from inside the game (global hotkey).
     let recenter = Arc::new(AtomicBool::new(false));
@@ -507,12 +515,12 @@ fn track_loop(eye: &Ps3Eye, width: usize, height: usize) -> Result<()> {
                 tracker.recenter();
                 recentered = true;
                 log::info!("recentered; tracking active");
-                beep(1500, 150);
+                beep(BEEP_RECENTER);
             }
             if recenter.swap(false, Ordering::SeqCst) {
                 tracker.recenter();
                 log::info!("recentered (Ctrl+Alt+R)");
-                beep(1500, 100);
+                beep(BEEP_RECENTER);
             }
             if frames % TARGET_FPS as usize == 0 {
                 log::info!(
@@ -529,7 +537,7 @@ fn track_loop(eye: &Ps3Eye, width: usize, height: usize) -> Result<()> {
         if on_recenter {
             tracker.recenter();
             log::info!("recentered (panel)");
-            beep(1500, 100);
+            beep(BEEP_RECENTER);
         }
         if on_quit {
             break;
