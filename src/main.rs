@@ -43,10 +43,32 @@ const RUN_FOR: Duration = Duration::from_secs(10);
 const SAMPLE_EVERY: usize = 250;
 /// Detector model, relative to the working directory.
 const DETECTOR_MODEL: &str = "models/face_detection_yunet.onnx";
-/// Landmark model, relative to the working directory.
+/// Landing model, relative to the working directory.
 const LANDMARK_MODEL: &str = "models/face_landmark_192.onnx";
 /// Creating this file stops the headless `--track` loop cleanly.
 const STOP_FILE: &str = "target/stop";
+
+/// Short audible cue (Windows `Beep`, falling back to the system sound).
+#[cfg(windows)]
+fn beep(frequency: u32, millis: u32) {
+    // SAFETY: `Beep`/`MessageBeep` have no memory-safety requirements.
+    let ok = unsafe { Beep(frequency, millis) };
+    if ok == 0 {
+        unsafe {
+            MessageBeep(0);
+        }
+    }
+}
+
+/// No-op on non-Windows targets.
+#[cfg(not(windows))]
+fn beep(_frequency: u32, _millis: u32) {}
+
+#[cfg(windows)]
+unsafe extern "system" {
+    fn Beep(frequency: u32, duration: u32) -> i32;
+    fn MessageBeep(beep_type: u32) -> i32;
+}
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Mode {
@@ -343,6 +365,7 @@ fn track_loop(eye: &Ps3Eye, width: usize, height: usize) -> Result<()> {
     );
     log::info!("look straight ahead; recentering in 3 s");
     log::info!("stop cleanly with Ctrl+C or by creating '{STOP_FILE}'");
+    beep(1000, 250);
 
     let started = Instant::now();
     let mut recentered = false;
@@ -357,7 +380,8 @@ fn track_loop(eye: &Ps3Eye, width: usize, height: usize) -> Result<()> {
             if !recentered && started.elapsed() >= Duration::from_secs(3) {
                 tracker.recenter();
                 recentered = true;
-                log::info!("recentered");
+                log::info!("recentered; tracking active");
+                beep(1500, 150);
             }
             if frames % TARGET_FPS as usize == 0 {
                 log::info!(
