@@ -67,6 +67,8 @@ pub struct AsyncStream {
     buffers: Vec<Vec<u8>>,
     event_thread: Option<JoinHandle<()>>,
     frame_rx: mpsc::Receiver<Vec<u8>>,
+    /// Frames discarded because a newer one was already queued.
+    skipped: AtomicUsize,
 }
 
 impl AsyncStream {
@@ -90,6 +92,7 @@ impl AsyncStream {
             buffers: (0..TRANSFERS).map(|_| vec![0_u8; TRANSFER_SIZE]).collect(),
             event_thread: None,
             frame_rx,
+            skipped: AtomicUsize::new(0),
         };
 
         let ctx_ptr = CtxPtr(ctx);
@@ -147,11 +150,28 @@ impl AsyncStream {
         Ok(stream)
     }
 
-    /// Wait for the next complete frame.
+    /// Wait for the next complete frame, preferring the freshest one.
+    ///
+    /// The producer channel is unbounded: if the consumer falls behind for even
+    /// a moment, frames pile up and every later frame is that much staler. So
+    /// after the first frame arrives, anything already queued is dropped and
+    /// the newest one is returned. Latency stays at one frame instead of
+    /// growing without bound.
     pub fn next_frame(&self, timeout: Duration) -> Result<Vec<u8>> {
-        self.frame_rx
+        let mut frame = self
+            .frame_rx
             .recv_timeout(timeout)
-            .context("no frame from the camera (stream stalled or stopped)")
+            .context("no frame from the camera (stream stalled or stopped)")?;
+        while let Ok(newer) = self.frame_rx.try_recv() {
+            frame = newer;
+            self.skipped.fetch_add(1, Ordering::Relaxed);
+        }
+        Ok(frame)
+    }
+
+    /// Frames dropped so far because a newer one was already waiting.
+    pub fn skipped(&self) -> usize {
+        self.skipped.load(Ordering::Relaxed)
     }
 }
 

@@ -49,6 +49,11 @@ const DETECTOR_MODEL: &str = "models/face_detection_yunet.onnx";
 const LANDMARK_MODEL: &str = "models/face_landmark_192.onnx";
 /// Creating this file stops the headless `--track` loop cleanly.
 const STOP_FILE: &str = "target/stop";
+/// Mirror the preview image horizontally (camera view → mirror view), so head
+/// motion on screen matches what the user feels. Flip to `false` to see the
+/// camera's own view. The pose itself is always computed from the unmirrored
+/// frame.
+const MIRROR_PREVIEW: bool = true;
 
 /// Control-panel size.
 const CONTROL_W: usize = 260;
@@ -140,6 +145,52 @@ fn parse_mode() -> Mode {
 /// Whether the given command-line switch was passed.
 fn has_flag(name: &str) -> bool {
     std::env::args().any(|a| a == name)
+}
+
+/// Once-a-second frame rate, dropped-frame and timing report.
+struct LoopStats {
+    last: Instant,
+    frames: u32,
+    last_dropped: usize,
+    read: Duration,
+    work: Duration,
+}
+
+impl LoopStats {
+    fn new() -> Self {
+        Self {
+            last: Instant::now(),
+            frames: 0,
+            last_dropped: 0,
+            read: Duration::ZERO,
+            work: Duration::ZERO,
+        }
+    }
+
+    /// Record one loop iteration; logs when a second has passed.
+    fn sample(&mut self, eye: &Ps3Eye, read: Duration, work: Duration) {
+        self.frames += 1;
+        self.read += read;
+        self.work += work;
+        let elapsed = self.last.elapsed();
+        if elapsed < Duration::from_secs(1) {
+            return;
+        }
+        let n = f64::from(self.frames);
+        let dropped = eye.skipped_frames();
+        log::info!(
+            "{:.1} fps  dropped {} ({dropped} total)  read {:.1}ms  work {:.1}ms",
+            n / elapsed.as_secs_f64(),
+            dropped.saturating_sub(self.last_dropped),
+            self.read.as_secs_f64() * 1000.0 / n,
+            self.work.as_secs_f64() * 1000.0 / n,
+        );
+        self.last = Instant::now();
+        self.frames = 0;
+        self.last_dropped = dropped;
+        self.read = Duration::ZERO;
+        self.work = Duration::ZERO;
+    }
 }
 
 /// Default mode: measure and report the camera frame rate.
@@ -256,9 +307,13 @@ fn preview_loop(eye: &Ps3Eye, width: usize, height: usize) -> Result<()> {
 
     let mut buffer = vec![0_u32; width * height];
     let mut frames: usize = 0;
+    let mut stats = LoopStats::new();
 
     while window.is_open() && !window.is_key_down(minifb::Key::Escape) {
+        let read_start = Instant::now();
         let raw = eye.read_raw_frame().context("frame read failed")?;
+        let read = read_start.elapsed();
+        let work_start = Instant::now();
         frames += 1;
         let mut rgb = vec![0_u8; width * height * 3];
         bayer::bayer_grbg_to_rgb(&raw, width, height, &mut rgb);
@@ -339,6 +394,13 @@ fn preview_loop(eye: &Ps3Eye, width: usize, height: usize) -> Result<()> {
                 draw_dot(&mut rgb, width, height, point.0, point.1, 0, 255, 0);
             }
 
+            // Mirror the image (overlays included) after drawing, so the
+            // preview behaves like a mirror while the HUD text below stays
+            // readable. Set MIRROR_PREVIEW to false to get the camera's view.
+            if MIRROR_PREVIEW {
+                mirror_rgb(&mut rgb, width, height);
+            }
+
             let state = match (tracker.neutral.is_some(), tracker.use_3d) {
                 (true, true) => "TRACKING 3D",
                 (true, false) => "TRACKING",
@@ -365,6 +427,7 @@ fn preview_loop(eye: &Ps3Eye, width: usize, height: usize) -> Result<()> {
         window
             .update_with_buffer(&buffer, width, height)
             .context("failed to update the preview window")?;
+        stats.sample(eye, read, work_start.elapsed());
     }
     Ok(())
 }
@@ -429,8 +492,12 @@ fn track_loop(eye: &Ps3Eye, width: usize, height: usize) -> Result<()> {
     let started = Instant::now();
     let mut recentered = false;
     let mut frames: usize = 0;
+    let mut stats = LoopStats::new();
     while !stop.load(Ordering::SeqCst) && !stop_file.exists() && window.is_open() {
+        let read_start = Instant::now();
         let raw = eye.read_raw_frame().context("frame read failed")?;
+        let read = read_start.elapsed();
+        let work_start = Instant::now();
         frames += 1;
         let mut rgb = vec![0_u8; width * height * 3];
         bayer::bayer_grbg_to_rgb(&raw, width, height, &mut rgb);
@@ -478,6 +545,7 @@ fn track_loop(eye: &Ps3Eye, width: usize, height: usize) -> Result<()> {
         window
             .update_with_buffer(&buffer, CONTROL_W, CONTROL_H)
             .context("failed to update the control window")?;
+        stats.sample(eye, read, work_start.elapsed());
     }
 
     log::info!("stopping; releasing the camera");
@@ -843,6 +911,24 @@ fn draw_hud(
         220,
         220,
     );
+}
+
+/// Flip an RGB8 image horizontally, in place.
+#[expect(
+    clippy::indexing_slicing,
+    reason = "pixel offsets are within the validated frame buffer"
+)]
+fn mirror_rgb(rgb: &mut [u8], width: usize, height: usize) {
+    for y in 0..height {
+        let row = y * width * 3;
+        for x in 0..width / 2 {
+            let a = row + x * 3;
+            let b = row + (width - 1 - x) * 3;
+            for i in 0..3 {
+                rgb.swap(a + i, b + i);
+            }
+        }
+    }
 }
 
 /// Convert an interleaved RGB8 frame to a `0x00RRGGBB` buffer for minifb.

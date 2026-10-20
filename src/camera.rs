@@ -227,6 +227,11 @@ impl Ps3Eye {
         let stream = self.stream.as_ref().context("stream is missing")?;
         stream.next_frame(FRAME_TIMEOUT)
     }
+
+    /// Frames dropped because a newer one was already queued (latency guard).
+    pub fn skipped_frames(&self) -> usize {
+        self.stream.as_ref().map_or(0, AsyncStream::skipped)
+    }
 }
 
 impl Drop for Ps3Eye {

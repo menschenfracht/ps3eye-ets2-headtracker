@@ -53,6 +53,11 @@ pub struct Tuning {
     pub deadzone: f32,
     /// EMA smoothing factor (0..1; lower = smoother/slower).
     pub smoothing: f32,
+    /// The camera sees you mirrored, so turning your head right moves the nose
+    /// toward image-left. The camera→head change of basis is a proper 180°
+    /// rotation, which flips **yaw and roll** but leaves **pitch** alone.
+    /// Inverting only yaw would be a mirror (det = -1): pure yaw and pure roll
+    /// still look right, but their combination cross-talks.
     pub invert_yaw: bool,
     pub invert_pitch: bool,
     pub invert_roll: bool,
@@ -68,7 +73,7 @@ impl Default for Tuning {
             smoothing: 0.35,
             invert_yaw: true,
             invert_pitch: false,
-            invert_roll: false,
+            invert_roll: true,
         }
     }
 }
