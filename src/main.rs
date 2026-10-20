@@ -137,6 +137,11 @@ fn parse_mode() -> Mode {
     }
 }
 
+/// Whether the given command-line switch was passed.
+fn has_flag(name: &str) -> bool {
+    std::env::args().any(|a| a == name)
+}
+
 /// Default mode: measure and report the camera frame rate.
 fn stream_loop(eye: &Ps3Eye, width: usize, height: usize) -> Result<()> {
     let started = Instant::now();
@@ -235,6 +240,7 @@ fn preview_loop(eye: &Ps3Eye, width: usize, height: usize) -> Result<()> {
         &environment,
         output::DEFAULT_PORT,
     )?;
+    tracker.use_3d |= has_flag("--3d");
     log::info!("sending pose to opentrack at 127.0.0.1:{}", output::DEFAULT_PORT);
 
     let mut window = minifb::Window::new(
@@ -309,6 +315,15 @@ fn preview_loop(eye: &Ps3Eye, width: usize, height: usize) -> Result<()> {
             tracker.tuning.invert_roll = !tracker.tuning.invert_roll;
             log::info!("invert_roll {}", tracker.tuning.invert_roll);
         }
+        // Toggle the experimental FaceMesh+Kabsch pose against the 2D one.
+        if window.is_key_pressed(minifb::Key::Key3, minifb::KeyRepeat::No) {
+            tracker.use_3d = !tracker.use_3d;
+            tracker.recenter();
+            log::info!(
+                "pose {} (recentered)",
+                if tracker.use_3d { "3D" } else { "2D" }
+            );
+        }
 
         if let Some(frame) = tracker.process(&rgb, width, height)? {
             draw_rect(&mut rgb, width, height, bx(frame.box_.0), bx(frame.box_.1), bx(frame.box_.2), bx(frame.box_.3), 255, 0, 0);
@@ -324,10 +339,11 @@ fn preview_loop(eye: &Ps3Eye, width: usize, height: usize) -> Result<()> {
                 draw_dot(&mut rgb, width, height, point.0, point.1, 0, 255, 0);
             }
 
-            let state = if tracker.neutral.is_some() {
-                "TRACKING"
-            } else {
-                "UNCALIBRATED"
+            let state = match (tracker.neutral.is_some(), tracker.use_3d) {
+                (true, true) => "TRACKING 3D",
+                (true, false) => "TRACKING",
+                (false, true) => "UNCALIBRATED 3D",
+                (false, false) => "UNCALIBRATED",
             };
             draw_hud(&mut rgb, width, height, state, frame.eye_dist, frame.pose, &tracker.tuning);
             if frames % TARGET_FPS as usize == 0 {
@@ -369,6 +385,7 @@ fn track_loop(eye: &Ps3Eye, width: usize, height: usize) -> Result<()> {
         &environment,
         output::DEFAULT_PORT,
     )?;
+    tracker.use_3d |= has_flag("--3d");
 
     // Clean shutdown: Ctrl+C sets the flag, then the loop returns and the
     // caller stops the camera stream.
@@ -820,7 +837,7 @@ fn draw_hud(
         height,
         6,
         height - 22,
-        "N M SMOOTH   I O P INVERT   ESC QUIT",
+        "N M SMOOTH   I O P INVERT   3 2D/3D   ESC QUIT",
         1,
         220,
         220,

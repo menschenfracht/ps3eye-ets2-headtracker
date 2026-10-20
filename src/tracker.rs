@@ -43,8 +43,9 @@ pub struct Tracker {
     /// 3D landmark cloud captured at recenter (the pose zero point).
     reference: Option<Vec<Vector3<f32>>>,
     last_cloud: Option<Vec<Vector3<f32>>>,
-    /// Opt-in 3D pose (`HEADTRACK_3D=1`); still being stabilised.
-    use_3d: bool,
+    /// Opt-in 3D pose (`HEADTRACK_3D=1`, `--3d`, or `3` in preview); still
+    /// being stabilised.
+    pub use_3d: bool,
     last_time: Instant,
 }
 
