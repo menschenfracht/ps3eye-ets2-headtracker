@@ -4,6 +4,7 @@
 //! → pose (eyes+nose) → tuning (neutral/gain/deadzone/invert) → One-Euro
 //! → UDP to opentrack.
 
+use std::env::var_os;
 use std::path::Path;
 use std::time::Instant;
 
@@ -42,6 +43,8 @@ pub struct Tracker {
     /// 3D landmark cloud captured at recenter (the pose zero point).
     reference: Option<Vec<Vector3<f32>>>,
     last_cloud: Option<Vec<Vector3<f32>>>,
+    /// Opt-in 3D pose (`HEADTRACK_3D=1`); still being stabilised.
+    use_3d: bool,
     last_time: Instant,
 }
 
@@ -67,6 +70,7 @@ impl Tracker {
             ref_eye: 0.0,
             reference: None,
             last_cloud: None,
+            use_3d: var_os("HEADTRACK_3D").is_some(),
             last_time: Instant::now(),
         })
     }
@@ -112,30 +116,38 @@ impl Tracker {
         let [eye_left, eye_right, nose, _mouth_r, _mouth_l] = landmarks;
         let eye_dist = (eye_right.0 - eye_left.0).hypot(eye_right.1 - eye_left.1);
 
-        // 3D pose: run FaceMesh on the smoothed face crop and align its
-        // landmark cloud to the reference captured at recenter.
-        let crop_face = Face {
-            x0: box_.0,
-            y0: box_.1,
-            x1: box_.2,
-            y1: box_.3,
-            score: 1.0,
-            landmarks,
-        };
-        let rect = face::face_rect(&crop_face);
-        let (mesh_landmarks, mesh_score) = self.mesh.run(rgb, width, height, &rect)?;
-        let cloud = pose3d::cloud(&mesh_landmarks);
-        let pose_3d = if mesh_score > 0.0 && cloud.len() >= 3 {
-            self.last_cloud = Some(cloud.clone());
-            if self.reference.is_none() {
-                self.reference = Some(cloud.clone());
-            }
-            self.reference.as_ref().and_then(|reference| {
-                pose3d::rotation(&cloud, reference).map(|r| {
-                    let (yaw, pitch, roll) = pose3d::angles(&r);
-                    Pose { yaw, pitch, roll }
+        // 3D pose (opt-in, still being stabilised): run FaceMesh on the
+        // smoothed face crop and align its landmark cloud to the reference
+        // captured at recenter.
+        let pose_3d = if self.use_3d {
+            let crop_face = Face {
+                x0: box_.0,
+                y0: box_.1,
+                x1: box_.2,
+                y1: box_.3,
+                score: 1.0,
+                landmarks,
+            };
+            let mut rect = face::face_rect(&crop_face);
+            // Feed FaceMesh an axis-aligned crop: the eye-alignment rotation
+            // would otherwise remove roll and add per-frame rotation noise.
+            rect.rotation = 0.0;
+            let (mesh_landmarks, mesh_score) = self.mesh.run(rgb, width, height, &rect)?;
+            let cloud = pose3d::cloud(&mesh_landmarks);
+            if mesh_score > 0.0 && cloud.len() >= 3 {
+                self.last_cloud = Some(cloud.clone());
+                if self.reference.is_none() {
+                    self.reference = Some(cloud.clone());
+                }
+                self.reference.as_ref().and_then(|reference| {
+                    pose3d::rotation(&cloud, reference).map(|r| {
+                        let (yaw, pitch, roll) = pose3d::angles(&r);
+                        Pose { yaw, pitch, roll }
+                    })
                 })
-            })
+            } else {
+                None
+            }
         } else {
             None
         };

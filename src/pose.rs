@@ -63,7 +63,7 @@ impl Default for Tuning {
         Self {
             yaw_gain: 1.7,
             pitch_gain: 3.5,
-            roll_gain: 0.0,
+            roll_gain: 1.0,
             deadzone: 1.0,
             smoothing: 0.35,
             invert_yaw: true,

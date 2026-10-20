@@ -21,14 +21,30 @@ const INDICES: [usize; 18] = [
     152, // chin
 ];
 
-/// Collect the stable landmarks as 3D points.
+/// Collect the stable landmarks as 3D points, centred and scaled to unit RMS
+/// radius so the crop size/position does not affect the Kabsch rotation.
 #[must_use]
 pub fn cloud(landmarks: &[Landmark]) -> Vec<Vector3<f32>> {
-    INDICES
+    let points: Vec<Vector3<f32>> = INDICES
         .iter()
         .filter_map(|&index| landmarks.get(index))
         .map(|l| Vector3::new(l.x, l.y, l.z))
-        .collect()
+        .collect();
+    if points.len() < 3 {
+        return points;
+    }
+    let n = points.len() as f32;
+    let mean = points.iter().sum::<Vector3<f32>>() / n;
+    let rms = (points
+        .iter()
+        .map(|p| (p - mean).norm_squared())
+        .sum::<f32>()
+        / n)
+        .sqrt();
+    if rms <= 0.0 {
+        return points;
+    }
+    points.iter().map(|p| (p - mean) / rms).collect()
 }
 
 /// Rotation `R` with `current ≈ R * reference` (Kabsch), or `None` when there
