@@ -22,6 +22,7 @@ mod camera;
 mod face;
 mod filter;
 mod font;
+mod hotkey;
 mod landmark;
 mod output;
 mod ov534;
@@ -47,6 +48,16 @@ const DETECTOR_MODEL: &str = "models/face_detection_yunet.onnx";
 const LANDMARK_MODEL: &str = "models/face_landmark_192.onnx";
 /// Creating this file stops the headless `--track` loop cleanly.
 const STOP_FILE: &str = "target/stop";
+
+/// Control-panel size.
+const CONTROL_W: usize = 260;
+const CONTROL_H: usize = 92;
+/// Button layout.
+const BTN_W: usize = 116;
+const BTN_H: usize = 44;
+const BTN_Y: usize = 34;
+const RECENTER_X: usize = 12;
+const QUIT_X: usize = 132;
 
 /// Short audible cue (Windows `Beep`, falling back to the system sound).
 #[cfg(windows)]
@@ -336,11 +347,11 @@ fn preview_loop(eye: &Ps3Eye, width: usize, height: usize) -> Result<()> {
     Ok(())
 }
 
-/// Headless tracker: pose → opentrack over UDP, with no window.
+/// Headless tracker with a small control panel: pose → opentrack over UDP.
 ///
-/// Looks straight ahead at startup; recenters automatically after 3 s so the
-/// neutral pose is zero. Stop cleanly with **Ctrl+C**, or by creating the
-/// `target/stop` file — either way the camera stream is stopped before exit.
+/// Looks straight ahead at startup; recenters automatically after 3 s. A tiny
+/// always-on-top panel has **Recenter** and **Quit** buttons; Ctrl+Alt+R also
+/// recenters. Ctrl+C, `target/stop`, or closing the panel stop cleanly.
 fn track_loop(eye: &Ps3Eye, width: usize, height: usize) -> Result<()> {
     let environment = ort::init()
         .with_telemetry(false)
@@ -360,17 +371,37 @@ fn track_loop(eye: &Ps3Eye, width: usize, height: usize) -> Result<()> {
     let stop_file = Path::new(STOP_FILE);
     let _ = std::fs::remove_file(stop_file);
     log::info!(
-        "tracking headless; pose → opentrack at 127.0.0.1:{}",
+        "tracking; pose → opentrack at 127.0.0.1:{}",
         output::DEFAULT_PORT
     );
     log::info!("look straight ahead; recentering in 3 s");
-    log::info!("stop cleanly with Ctrl+C or by creating '{STOP_FILE}'");
+    log::info!("stop with Ctrl+C or the control panel; Ctrl+Alt+R recenters");
     beep(1000, 250);
+
+    // Ctrl+Alt+R recenters from inside the game (global hotkey).
+    let recenter = Arc::new(AtomicBool::new(false));
+    hotkey::spawn(Arc::clone(&recenter)).context("failed to register Ctrl+Alt+R")?;
+
+    // Small always-on-top control panel.
+    let mut window = minifb::Window::new(
+        "Headtrack",
+        CONTROL_W,
+        CONTROL_H,
+        minifb::WindowOptions {
+            topmost: true,
+            resize: false,
+            ..minifb::WindowOptions::default()
+        },
+    )
+    .context("failed to open the control window")?;
+    let mut control_rgb = vec![0_u8; CONTROL_W * CONTROL_H * 3];
+    let mut buffer = vec![0_u32; CONTROL_W * CONTROL_H];
+    let mut mouse_down = false;
 
     let started = Instant::now();
     let mut recentered = false;
     let mut frames: usize = 0;
-    while !stop.load(Ordering::SeqCst) && !stop_file.exists() {
+    while !stop.load(Ordering::SeqCst) && !stop_file.exists() && window.is_open() {
         let raw = eye.read_raw_frame().context("frame read failed")?;
         frames += 1;
         let mut rgb = vec![0_u8; width * height * 3];
@@ -383,6 +414,11 @@ fn track_loop(eye: &Ps3Eye, width: usize, height: usize) -> Result<()> {
                 log::info!("recentered; tracking active");
                 beep(1500, 150);
             }
+            if recenter.swap(false, Ordering::SeqCst) {
+                tracker.recenter();
+                log::info!("recentered (Ctrl+Alt+R)");
+                beep(1500, 100);
+            }
             if frames % TARGET_FPS as usize == 0 {
                 log::info!(
                     "eye_dist={:4.1}px  yaw {:>6.1}  pitch {:>6.1}  roll {:>6.1}",
@@ -393,10 +429,101 @@ fn track_loop(eye: &Ps3Eye, width: usize, height: usize) -> Result<()> {
                 );
             }
         }
+
+        let (on_recenter, on_quit) = control_hits(&window, &mut mouse_down);
+        if on_recenter {
+            tracker.recenter();
+            log::info!("recentered (panel)");
+            beep(1500, 100);
+        }
+        if on_quit {
+            break;
+        }
+
+        draw_control(
+            &mut control_rgb,
+            on_recenter,
+            on_quit,
+            tracker.neutral.is_some(),
+        );
+        rgb_to_u32(&control_rgb, CONTROL_W, CONTROL_H, &mut buffer);
+        window
+            .update_with_buffer(&buffer, CONTROL_W, CONTROL_H)
+            .context("failed to update the control window")?;
     }
 
     log::info!("stopping; releasing the camera");
     Ok(())
+}
+
+/// Point-in-rectangle test.
+fn in_rect(x: f32, y: f32, rx: usize, ry: usize, rw: usize, rh: usize) -> bool {
+    x >= rx as f32 && x < (rx + rw) as f32 && y >= ry as f32 && y < (ry + rh) as f32
+}
+
+/// Read clicks on the control panel's buttons (edge-triggered).
+fn control_hits(window: &minifb::Window, mouse_down: &mut bool) -> (bool, bool) {
+    let down = window.get_mouse_down(minifb::MouseButton::Left);
+    let edge = down && !*mouse_down;
+    *mouse_down = down;
+    if !edge {
+        return (false, false);
+    }
+    let Some((mx, my)) = window.get_mouse_pos(minifb::MouseMode::Discard) else {
+        return (false, false);
+    };
+    (
+        in_rect(mx, my, RECENTER_X, BTN_Y, BTN_W, BTN_H),
+        in_rect(mx, my, QUIT_X, BTN_Y, BTN_W, BTN_H),
+    )
+}
+
+/// Fill a rectangle.
+fn fill_rect(
+    rgb: &mut [u8],
+    width: usize,
+    height: usize,
+    x: usize,
+    y: usize,
+    w: usize,
+    h: usize,
+    r: u8,
+    g: u8,
+    b: u8,
+) {
+    for yy in y..(y + h).min(height) {
+        for xx in x..(x + w).min(width) {
+            put_px(rgb, width, height, xx, yy, r, g, b);
+        }
+    }
+}
+
+/// Draw the control panel.
+fn draw_control(rgb: &mut [u8], on_recenter: bool, on_quit: bool, tracking: bool) {
+    let (w, h) = (CONTROL_W, CONTROL_H);
+    fill_rect(rgb, w, h, 0, 0, w, h, 24, 24, 28);
+
+    let status = if tracking { "TRACKING" } else { "UNCALIBRATED" };
+    draw_text_shadow(rgb, w, h, 8, 8, status, 1, 200, 220, 255);
+
+    let (rb, gb, bb) = if on_recenter {
+        (80, 130, 200)
+    } else {
+        (40, 80, 140)
+    };
+    fill_rect(rgb, w, h, RECENTER_X, BTN_Y, BTN_W, BTN_H, rb, gb, bb);
+    let (rq, gq, bq) = if on_quit {
+        (200, 80, 80)
+    } else {
+        (140, 40, 40)
+    };
+    fill_rect(rgb, w, h, QUIT_X, BTN_Y, BTN_W, BTN_H, rq, gq, bq);
+
+    let text_y = BTN_Y + (BTN_H - 7) / 2;
+    let recenter_x = RECENTER_X + (BTN_W - "RECENTER".len() * 6) / 2;
+    let quit_x = QUIT_X + (BTN_W - "QUIT".len() * 6) / 2;
+    draw_text_shadow(rgb, w, h, recenter_x, text_y, "RECENTER", 1, 255, 255, 255);
+    draw_text_shadow(rgb, w, h, quit_x, text_y, "QUIT", 1, 255, 255, 255);
 }
 
 /// Draw the outline of an ellipse (the head-position guide).
