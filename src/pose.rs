@@ -66,7 +66,7 @@ impl Default for Tuning {
             roll_gain: 1.0,
             deadzone: 0.5,
             smoothing: 0.35,
-            invert_yaw: false,
+            invert_yaw: true,
             invert_pitch: false,
             invert_roll: false,
         }
