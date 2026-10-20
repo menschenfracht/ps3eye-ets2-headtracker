@@ -8,12 +8,15 @@ use std::path::Path;
 use std::time::Instant;
 
 use anyhow::Result;
+use nalgebra::Vector3;
 use ort::environment::Environment;
 
-use crate::face::{Face, FaceDetector};
+use crate::face::{self, Face, FaceDetector};
 use crate::filter::OneEuro;
+use crate::landmark::FaceMesh;
 use crate::output::OpenTrack;
 use crate::pose::{self, Pose, Tuning};
+use crate::pose3d;
 
 /// Per-frame output used for drawing and logging.
 pub struct Frame {
@@ -26,6 +29,7 @@ pub struct Frame {
 
 pub struct Tracker {
     detector: FaceDetector,
+    mesh: FaceMesh,
     udp: OpenTrack,
     pub tuning: Tuning,
     pub neutral: Option<Pose>,
@@ -35,14 +39,23 @@ pub struct Tracker {
     smoothed_lm: Option<[(f32, f32); 5]>,
     smoothed_box: Option<(f32, f32, f32, f32)>,
     ref_eye: f32,
+    /// 3D landmark cloud captured at recenter (the pose zero point).
+    reference: Option<Vec<Vector3<f32>>>,
+    last_cloud: Option<Vec<Vector3<f32>>>,
     last_time: Instant,
 }
 
 impl Tracker {
-    /// Load the face detector and open the opentrack UDP output.
-    pub fn load(detector_model: &Path, env: &Environment, port: u16) -> Result<Self> {
+    /// Load the face detector, the landmark model and the opentrack UDP output.
+    pub fn load(
+        detector_model: &Path,
+        landmark_model: &Path,
+        env: &Environment,
+        port: u16,
+    ) -> Result<Self> {
         Ok(Self {
             detector: FaceDetector::load(detector_model, env)?,
+            mesh: FaceMesh::load(landmark_model, env)?,
             udp: OpenTrack::connect(port)?,
             tuning: Tuning::default(),
             neutral: None,
@@ -52,12 +65,15 @@ impl Tracker {
             smoothed_lm: None,
             smoothed_box: None,
             ref_eye: 0.0,
+            reference: None,
+            last_cloud: None,
             last_time: Instant::now(),
         })
     }
 
     /// Capture the current pose as the neutral (zero) reference.
     pub fn recenter(&mut self) {
+        self.reference = self.last_cloud.clone();
         if let Some(p) = self.last_pose {
             self.neutral = Some(p);
         }
@@ -95,10 +111,42 @@ impl Tracker {
 
         let [eye_left, eye_right, nose, _mouth_r, _mouth_l] = landmarks;
         let eye_dist = (eye_right.0 - eye_left.0).hypot(eye_right.1 - eye_left.1);
-        let raw_pose = pose::estimate(&[eye_left, eye_right, nose]);
+
+        // 3D pose: run FaceMesh on the smoothed face crop and align its
+        // landmark cloud to the reference captured at recenter.
+        let crop_face = Face {
+            x0: box_.0,
+            y0: box_.1,
+            x1: box_.2,
+            y1: box_.3,
+            score: 1.0,
+            landmarks,
+        };
+        let rect = face::face_rect(&crop_face);
+        let (mesh_landmarks, mesh_score) = self.mesh.run(rgb, width, height, &rect)?;
+        let cloud = pose3d::cloud(&mesh_landmarks);
+        let pose_3d = if mesh_score > 0.0 && cloud.len() >= 3 {
+            self.last_cloud = Some(cloud.clone());
+            if self.reference.is_none() {
+                self.reference = Some(cloud.clone());
+            }
+            self.reference.as_ref().and_then(|reference| {
+                pose3d::rotation(&cloud, reference).map(|r| {
+                    let (yaw, pitch, roll) = pose3d::angles(&r);
+                    Pose { yaw, pitch, roll }
+                })
+            })
+        } else {
+            None
+        };
+
+        let raw_pose = pose_3d.unwrap_or_else(|| pose::estimate(&[eye_left, eye_right, nose]));
         self.last_pose = Some(raw_pose);
 
-        let shown = self.tuning.apply(raw_pose, self.neutral);
+        // The 3D rotation is already relative to the recenter reference, so it
+        // must not subtract `neutral` again; the 2D fallback still needs it.
+        let neutral = if pose_3d.is_some() { None } else { self.neutral };
+        let shown = self.tuning.apply(raw_pose, neutral);
         let now = Instant::now();
         let dt = (now - self.last_time).as_secs_f32();
         self.last_time = now;

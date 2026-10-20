@@ -27,6 +27,7 @@ mod landmark;
 mod output;
 mod ov534;
 mod pose;
+mod pose3d;
 mod scanner;
 mod tracker;
 
@@ -228,7 +229,12 @@ fn preview_loop(eye: &Ps3Eye, width: usize, height: usize) -> Result<()> {
         .with_telemetry(false)
         .build()
         .context("failed to initialise ONNX Runtime")?;
-    let mut tracker = Tracker::load(Path::new(DETECTOR_MODEL), &environment, output::DEFAULT_PORT)?;
+    let mut tracker = Tracker::load(
+        Path::new(DETECTOR_MODEL),
+        Path::new(LANDMARK_MODEL),
+        &environment,
+        output::DEFAULT_PORT,
+    )?;
     log::info!("sending pose to opentrack at 127.0.0.1:{}", output::DEFAULT_PORT);
 
     let mut window = minifb::Window::new(
@@ -357,7 +363,12 @@ fn track_loop(eye: &Ps3Eye, width: usize, height: usize) -> Result<()> {
         .with_telemetry(false)
         .build()
         .context("failed to initialise ONNX Runtime")?;
-    let mut tracker = Tracker::load(Path::new(DETECTOR_MODEL), &environment, output::DEFAULT_PORT)?;
+    let mut tracker = Tracker::load(
+        Path::new(DETECTOR_MODEL),
+        Path::new(LANDMARK_MODEL),
+        &environment,
+        output::DEFAULT_PORT,
+    )?;
 
     // Clean shutdown: Ctrl+C sets the flag, then the loop returns and the
     // caller stops the camera stream.
