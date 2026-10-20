@@ -5,6 +5,7 @@
 //! - `--detect` run the face detector headless and save annotated samples;
 //! - `--capture` save clean (unannotated) samples for offline analysis;
 //! - `--preview` the tracker with a live overlay and tuning keys;
+//! - `--record` guided capture of a fixed head-move sequence to `docs/pose.csv`;
 //! - `--track` the tracker headless: pose → opentrack over UDP, no window;
 //! - `--facemesh` the FaceMesh inspection harness: crop, landmarks, score.
 
@@ -49,6 +50,23 @@ const DETECTOR_MODEL: &str = "models/face_detection_yunet.onnx";
 const LANDMARK_MODEL: &str = "models/face_landmark_192.onnx";
 /// Creating this file stops the headless `--track` loop cleanly.
 const STOP_FILE: &str = "target/stop";
+
+/// Guided head poses for `--record`: a neutral, the six directions of the
+/// on-screen cross, then neutral again as a return-to-centre check.
+const RECORD_STAGES: [&str; 8] = [
+    "straight",
+    "up",
+    "down",
+    "left",
+    "right",
+    "tilt left",
+    "tilt right",
+    "straight",
+];
+/// Seconds spent in each guided pose.
+const STAGE_SECS: f32 = 4.0;
+/// Guided capture output (one row per frame).
+const RECORD_FILE: &str = "docs/pose.csv";
 /// Mirror the preview image horizontally (camera view → mirror view), so head
 /// motion on screen matches what the user feels. Flip to `false` to see the
 /// camera's own view. The pose itself is always computed from the unmirrored
@@ -65,11 +83,12 @@ const BTN_Y: usize = 34;
 const RECENTER_X: usize = 12;
 const QUIT_X: usize = 132;
 
-/// Every cue is one of these two tones, shared by every mode: startup and
-/// recenter differ in pitch, but all recenters sound identical no matter how
-/// they were triggered (auto, global hotkey, panel, or preview key).
+/// Every cue is one of these tones, shared by every mode: startup, recenter
+/// and stage changes differ in pitch, but the same event always sounds the
+/// same no matter which mode triggered it.
 const BEEP_START: (u32, u32) = (1000, 250);
 const BEEP_RECENTER: (u32, u32) = (1500, 100);
+const BEEP_STAGE: (u32, u32) = (2000, 60);
 
 /// Short audible cue (Windows `Beep`, falling back to the system sound).
 #[cfg(windows)]
@@ -99,6 +118,7 @@ enum Mode {
     Detect,
     Capture,
     Preview,
+    Record,
     Track,
     Facemesh,
 }
@@ -122,7 +142,8 @@ fn main() -> Result<()> {
         Mode::Stream => stream_loop(&eye, width, height),
         Mode::Detect => detect_loop(&eye, width, height),
         Mode::Capture => capture_loop(&eye, width, height),
-        Mode::Preview => preview_loop(&eye, width, height),
+        Mode::Preview => preview_loop(&eye, width, height, false),
+        Mode::Record => preview_loop(&eye, width, height, true),
         Mode::Track => track_loop(&eye, width, height),
         Mode::Facemesh => facemesh_loop(&eye, width, height),
     }?;
@@ -135,6 +156,8 @@ fn parse_mode() -> Mode {
     let args: Vec<String> = std::env::args().collect();
     if args.iter().any(|a| a == "--preview") {
         Mode::Preview
+    } else if args.iter().any(|a| a == "--record") {
+        Mode::Record
     } else if args.iter().any(|a| a == "--track") {
         Mode::Track
     } else if args.iter().any(|a| a == "--facemesh") {
@@ -196,6 +219,82 @@ impl LoopStats {
         self.last_dropped = dropped;
         self.read = Duration::ZERO;
         self.work = Duration::ZERO;
+    }
+}
+
+/// One arm of the guided-capture cross.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Dir {
+    Up,
+    Down,
+    Left,
+    Right,
+    RollLeft,
+    RollRight,
+}
+
+/// Which cross arm a `RECORD_STAGES` entry asks for.
+fn stage_dir(stage: usize) -> Option<Dir> {
+    match RECORD_STAGES.get(stage).copied() {
+        Some("up") => Some(Dir::Up),
+        Some("down") => Some(Dir::Down),
+        Some("left") => Some(Dir::Left),
+        Some("right") => Some(Dir::Right),
+        Some("tilt left") => Some(Dir::RollLeft),
+        Some("tilt right") => Some(Dir::RollRight),
+        _ => None,
+    }
+}
+
+/// Per-frame CSV log for the guided capture.
+struct Recorder {
+    out: std::io::BufWriter<std::fs::File>,
+}
+
+impl Recorder {
+    fn create(path: &str) -> Result<Self> {
+        let file = std::fs::File::create(path).with_context(|| format!("failed to create {path}"))?;
+        let mut out = std::io::BufWriter::new(file);
+        writeln!(
+            out,
+            "t_s,stage,move,eye_l_x,eye_l_y,eye_r_x,eye_r_y,nose_x,nose_y,\
+             mouth_r_x,mouth_r_y,mouth_l_x,mouth_l_y,\
+             box_x0,box_y0,box_x1,box_y1,eye_dist,\
+             yaw_raw,pitch_raw,roll_raw,yaw,pitch,roll"
+        )?;
+        Ok(Self { out })
+    }
+
+    fn row(&mut self, t: f32, stage: usize, frame: &tracker::Frame) -> Result<()> {
+        let [el, er, nose, mr, ml] = frame.landmarks;
+        writeln!(
+            self.out,
+            "{t:.3},{stage},{},{:.2},{:.2},{:.2},{:.2},{:.2},{:.2},{:.2},{:.2},{:.2},{:.2},\
+             {:.2},{:.2},{:.2},{:.2},{:.2},{:.3},{:.3},{:.3},{:.3},{:.3},{:.3}",
+            RECORD_STAGES.get(stage).copied().unwrap_or("?"),
+            el.0,
+            el.1,
+            er.0,
+            er.1,
+            nose.0,
+            nose.1,
+            mr.0,
+            mr.1,
+            ml.0,
+            ml.1,
+            frame.box_.0,
+            frame.box_.1,
+            frame.box_.2,
+            frame.box_.3,
+            frame.eye_dist,
+            frame.raw_pose.yaw,
+            frame.raw_pose.pitch,
+            frame.raw_pose.roll,
+            frame.pose.yaw,
+            frame.pose.pitch,
+            frame.pose.roll
+        )?;
+        Ok(())
     }
 }
 
@@ -286,7 +385,7 @@ fn capture_loop(eye: &Ps3Eye, width: usize, height: usize) -> Result<()> {
 ///
 /// Draws an oval guide to position the head. Press `F` to start a 10-second
 /// neutral calibration (hold still); the averaged pose becomes the zero point.
-fn preview_loop(eye: &Ps3Eye, width: usize, height: usize) -> Result<()> {
+fn preview_loop(eye: &Ps3Eye, width: usize, height: usize, record: bool) -> Result<()> {
     let environment = ort::init()
         .with_telemetry(false)
         .build()
@@ -299,6 +398,14 @@ fn preview_loop(eye: &Ps3Eye, width: usize, height: usize) -> Result<()> {
     )?;
     tracker.use_3d |= has_flag("--3d");
     log::info!("sending pose to opentrack at 127.0.0.1:{}", output::DEFAULT_PORT);
+    let mut recorder = if record {
+        log::info!("guided capture → {RECORD_FILE}; follow the highlighted arrow");
+        Some(Recorder::create(RECORD_FILE)?)
+    } else {
+        None
+    };
+    let started = Instant::now();
+    let mut last_stage = usize::MAX;
 
     let mut window = minifb::Window::new(
         "PS3 Eye head tracker",
@@ -388,7 +495,24 @@ fn preview_loop(eye: &Ps3Eye, width: usize, height: usize) -> Result<()> {
             beep(BEEP_RECENTER);
         }
 
-        if let Some(frame) = tracker.process(&rgb, width, height)? {
+        // Guided capture: advance the stage, cue it, and keep the arrow in
+        // sync with the stage clock.
+        let stage = if record {
+            ((started.elapsed().as_secs_f32() / STAGE_SECS) as usize).min(RECORD_STAGES.len())
+        } else {
+            0
+        };
+        if record && stage != last_stage {
+            if let Some(name) = RECORD_STAGES.get(stage) {
+                log::info!("stage {}/{}: {name}", stage + 1, RECORD_STAGES.len());
+            }
+            beep(BEEP_STAGE);
+            last_stage = stage;
+        }
+
+        let frame = tracker.process(&rgb, width, height)?;
+
+        if let Some(frame) = frame {
             draw_rect(&mut rgb, width, height, bx(frame.box_.0), bx(frame.box_.1), bx(frame.box_.2), bx(frame.box_.3), 255, 0, 0);
 
             let [eye_left, eye_right, nose, _mouth_r, _mouth_l] = frame.landmarks;
@@ -402,23 +526,17 @@ fn preview_loop(eye: &Ps3Eye, width: usize, height: usize) -> Result<()> {
                 draw_dot(&mut rgb, width, height, point.0, point.1, 0, 255, 0);
             }
 
-            // Mirror the image (overlays included) after drawing, so the
-            // preview behaves like a mirror while the HUD text below stays
-            // readable. Set MIRROR_PREVIEW to false to get the camera's view.
-            if MIRROR_PREVIEW {
-                mirror_rgb(&mut rgb, width, height);
+            if let Some(rec) = recorder.as_mut() {
+                rec.row(
+                    started.elapsed().as_secs_f32(),
+                    stage.min(RECORD_STAGES.len() - 1),
+                    &frame,
+                )?;
             }
 
-            let state = match (tracker.neutral.is_some(), tracker.use_3d) {
-                (true, true) => "TRACKING 3D",
-                (true, false) => "TRACKING",
-                (false, true) => "UNCALIBRATED 3D",
-                (false, false) => "UNCALIBRATED",
-            };
-            draw_hud(&mut rgb, width, height, state, frame.eye_dist, frame.pose, &tracker.tuning);
             if frames % TARGET_FPS as usize == 0 {
                 log::info!(
-                    "{state:12} eye_dist={:4.1}px  yaw {:>6.1}  pitch {:>6.1}  roll {:>6.1}  [gain {:.1}/{:.1} dz {:.1} sm {:.2}]",
+                    "eye_dist={:4.1}px  yaw {:>6.1}  pitch {:>6.1}  roll {:>6.1}  [gain {:.1}/{:.1} dz {:.1} sm {:.2}]",
                     frame.eye_dist,
                     frame.pose.yaw,
                     frame.pose.pitch,
@@ -431,11 +549,48 @@ fn preview_loop(eye: &Ps3Eye, width: usize, height: usize) -> Result<()> {
             }
         }
 
+        // Mirror the camera image together with its face overlays, so the
+        // preview behaves like a mirror. UI drawn below stays readable.
+        if MIRROR_PREVIEW {
+            mirror_rgb(&mut rgb, width, height);
+        }
+
+        if let Some(frame) = frame {
+            let state = match (tracker.neutral.is_some(), tracker.use_3d) {
+                (true, true) => "TRACKING 3D",
+                (true, false) => "TRACKING",
+                (false, true) => "UNCALIBRATED 3D",
+                (false, false) => "UNCALIBRATED",
+            };
+            draw_hud(&mut rgb, width, height, state, frame.eye_dist, frame.pose, &tracker.tuning);
+        }
+
+        if record && stage < RECORD_STAGES.len() {
+            draw_guide(&mut rgb, width, height, stage_dir(stage));
+            draw_text_shadow(
+                &mut rgb,
+                width,
+                height,
+                6,
+                56,
+                &RECORD_STAGES[stage].to_uppercase(),
+                2,
+                255,
+                220,
+                0,
+            );
+        }
+
         rgb_to_u32(&rgb, width, height, &mut buffer);
         window
             .update_with_buffer(&buffer, width, height)
             .context("failed to update the preview window")?;
         stats.sample(eye, read, work_start.elapsed());
+
+        if record && stage >= RECORD_STAGES.len() {
+            log::info!("guided capture complete");
+            break;
+        }
     }
     Ok(())
 }
@@ -801,6 +956,92 @@ fn draw_dot(rgb: &mut [u8], width: usize, height: usize, x: f32, y: f32, r: u8, 
             put_px(rgb, width, height, x + dx, y + dy, r, g, b);
         }
     }
+}
+
+/// Arrowhead at `tip`, pointing along the unit vector `dir`.
+fn draw_head(
+    rgb: &mut [u8],
+    width: usize,
+    height: usize,
+    tip: (f32, f32),
+    dir: (f32, f32),
+    c: (u8, u8, u8),
+) {
+    let (ux, uy) = dir;
+    let head = 11.0_f32;
+    for spread in [0.5_f32, -0.5] {
+        let (s, k) = spread.sin_cos();
+        let hx = tip.0 - head * (ux * k - uy * s);
+        let hy = tip.1 - head * (uy * k + ux * s);
+        draw_line(rgb, width, height, tip, (hx, hy), c.0, c.1, c.2);
+    }
+}
+
+/// Straight arrow from `from` to `to`.
+fn draw_arrow(
+    rgb: &mut [u8],
+    width: usize,
+    height: usize,
+    from: (f32, f32),
+    to: (f32, f32),
+    c: (u8, u8, u8),
+) {
+    draw_line(rgb, width, height, from, to, c.0, c.1, c.2);
+    let (dx, dy) = (to.0 - from.0, to.1 - from.1);
+    let len = dx.hypot(dy).max(1.0);
+    draw_head(rgb, width, height, to, (dx / len, dy / len), c);
+}
+
+/// Circular "turn your head" arrow centred on `centre`.
+fn draw_rotate(
+    rgb: &mut [u8],
+    width: usize,
+    height: usize,
+    centre: (f32, f32),
+    radius: f32,
+    clockwise: bool,
+    c: (u8, u8, u8),
+) {
+    const SWEEP: f32 = 4.8; // radians, ~275°
+    const STEPS: usize = 16;
+    let start = 0.9_f32;
+    let dir = if clockwise { 1.0_f32 } else { -1.0 };
+    let at = |i: usize| start + dir * SWEEP * (i as f32 / STEPS as f32);
+    let point = |a: f32| (centre.0 + radius * a.cos(), centre.1 + radius * a.sin());
+
+    let mut prev = point(at(0));
+    for i in 1..=STEPS {
+        let p = point(at(i));
+        draw_line(rgb, width, height, prev, p, c.0, c.1, c.2);
+        prev = p;
+    }
+    let end = at(STEPS);
+    draw_head(rgb, width, height, prev, (-end.sin() * dir, end.cos() * dir), c);
+}
+
+/// Six-way head-move guide: up, down, left, right and two roll arrows.
+///
+/// The arm for `active` is highlighted; the rest stay dim so the next move is
+/// obvious at a glance.
+fn draw_guide(rgb: &mut [u8], width: usize, height: usize, active: Option<Dir>) {
+    let cx = width as f32 * 0.5;
+    let cy = height as f32 * 0.5 - 30.0;
+    let arm = 96.0_f32;
+    let colour = |dir: Dir| {
+        if active == Some(dir) {
+            (255, 220, 0)
+        } else {
+            (110, 110, 110)
+        }
+    };
+
+    draw_arrow(rgb, width, height, (cx, cy - 16.0), (cx, cy - arm), colour(Dir::Up));
+    draw_arrow(rgb, width, height, (cx, cy + 16.0), (cx, cy + arm), colour(Dir::Down));
+    draw_arrow(rgb, width, height, (cx - 16.0, cy), (cx - arm, cy), colour(Dir::Left));
+    draw_arrow(rgb, width, height, (cx + 16.0, cy), (cx + arm, cy), colour(Dir::Right));
+
+    draw_rotate(rgb, width, height, (cx - 52.0, cy + 52.0), 26.0, false, colour(Dir::RollLeft));
+    draw_rotate(rgb, width, height, (cx + 52.0, cy + 52.0), 26.0, true, colour(Dir::RollRight));
 }
 
 /// Draw a string with the 5x7 font, `scale` screen pixels per font pixel.

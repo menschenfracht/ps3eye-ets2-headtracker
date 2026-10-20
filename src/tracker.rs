@@ -20,12 +20,15 @@ use crate::pose::{self, Pose, Tuning};
 use crate::pose3d;
 
 /// Per-frame output used for drawing and logging.
+#[derive(Clone, Copy)]
 pub struct Frame {
     pub box_: (f32, f32, f32, f32),
     pub landmarks: [(f32, f32); 5],
     pub eye_dist: f32,
     /// Filtered pose actually sent to opentrack.
     pub pose: Pose,
+    /// Pose straight from the landmarks, before neutral/gain/deadzone.
+    pub raw_pose: Pose,
 }
 
 pub struct Tracker {
@@ -175,6 +178,7 @@ impl Tracker {
             landmarks,
             eye_dist,
             pose,
+            raw_pose,
         }))
     }
 }
