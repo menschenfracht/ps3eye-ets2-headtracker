@@ -19,3 +19,6 @@ docs/*.log
 # IDE
 .idea/
 .vscode/
+
+# Personal landmark captures — NEVER commit (biometric data)
+docs/*.csv

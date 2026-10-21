@@ -69,6 +69,8 @@ const STAGE_SECS: f32 = 4.0;
 const COUNTDOWN_SECS: f32 = 3.0;
 /// Guided capture output (one row per frame).
 const RECORD_FILE: &str = "docs/pose.csv";
+/// Free-movement log output (one row per frame).
+const LIVE_FILE: &str = "docs/live.csv";
 /// Mirror the preview image horizontally (camera view → mirror view), so head
 /// motion on screen matches what the user feels. Flip to `false` to see the
 /// camera's own view. The pose itself is always computed from the unmirrored
@@ -267,13 +269,12 @@ impl Recorder {
         Ok(Self { out })
     }
 
-    fn row(&mut self, t: f32, stage: usize, frame: &tracker::Frame) -> Result<()> {
+    fn row(&mut self, t: f32, stage: usize, name: &str, frame: &tracker::Frame) -> Result<()> {
         let [el, er, nose, mr, ml] = frame.landmarks;
         writeln!(
             self.out,
-            "{t:.3},{stage},{},{},{:.2},{:.2},{:.2},{:.2},{:.2},{:.2},{:.2},{:.2},{:.2},{:.2},\
+            "{t:.3},{stage},{name},{},{:.2},{:.2},{:.2},{:.2},{:.2},{:.2},{:.2},{:.2},{:.2},{:.2},\
              {:.2},{:.2},{:.2},{:.2},{:.2},{:.3},{:.3},{:.3},{:.3},{:.3},{:.3}",
-            RECORD_STAGES.get(stage).copied().unwrap_or("?"),
             u8::from(frame.detected),
             el.0,
             el.1,
@@ -413,9 +414,13 @@ fn preview_loop(eye: &Ps3Eye, width: usize, height: usize, record: bool) -> Resu
                 .join(", ")
         );
         Some(Recorder::create(RECORD_FILE)?)
+    } else if has_flag("--log") {
+        log::info!("writing every frame to {LIVE_FILE}");
+        Some(Recorder::create(LIVE_FILE)?)
     } else {
         None
     };
+    let preview_started = Instant::now();
     let mut armed: Option<Instant> = None;
     let mut last_stage: Option<usize> = None;
 
@@ -551,7 +556,12 @@ fn preview_loop(eye: &Ps3Eye, width: usize, height: usize, record: bool) -> Resu
             if let (Some(rec), Some(s)) = (recorder.as_mut(), stage) {
                 if s < RECORD_STAGES.len() {
                     let t = armed.map_or(0.0, |t0| t0.elapsed().as_secs_f32());
-                    rec.row(t, s, &frame)?;
+                    rec.row(t, s, RECORD_STAGES[s], &frame)?;
+                }
+            } else if let (Some(rec), None) = (recorder.as_mut(), stage) {
+                if !record {
+                    let t = preview_started.elapsed().as_secs_f32();
+                    rec.row(t, 0, "free", &frame)?;
                 }
             }
 
