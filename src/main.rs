@@ -94,6 +94,20 @@ const BEEP_START: (u32, u32) = (1000, 250);
 const BEEP_RECENTER: (u32, u32) = (1500, 100);
 const BEEP_STAGE: (u32, u32) = (2000, 60);
 
+/// Three falling notes, played when the face has been gone for a while:
+/// "I lost you, come back and recenter".
+fn beep_lost() {
+    for frequency in [900, 800, 700] {
+        beep((frequency, 90));
+        std::thread::sleep(std::time::Duration::from_millis(70));
+    }
+}
+
+/// How long the face may be gone before the first cue.
+const LOST_GRACE: std::time::Duration = std::time::Duration::from_secs(1);
+/// How often to repeat the cue while the face stays gone.
+const LOST_REPEAT: std::time::Duration = std::time::Duration::from_secs(4);
+
 /// Short audible cue (Windows `Beep`, falling back to the system sound).
 #[cfg(windows)]
 fn beep((frequency, millis): (u32, u32)) {
@@ -701,7 +715,7 @@ fn track_loop(eye: &Ps3Eye, width: usize, height: usize) -> Result<()> {
         "tracking; pose → opentrack at 127.0.0.1:{}",
         output::DEFAULT_PORT
     );
-    log::info!("look straight ahead; recentering in 3 s");
+    log::info!("look at the camera; recentering in 3 s");
     log::info!("stop with Ctrl+C or the control panel; Ctrl+Alt+R recenters");
     beep(BEEP_START);
 
@@ -729,6 +743,8 @@ fn track_loop(eye: &Ps3Eye, width: usize, height: usize) -> Result<()> {
     let mut recentered = false;
     let mut frames: usize = 0;
     let mut stats = LoopStats::new();
+    let mut lost_since: Option<Instant> = None;
+    let mut last_lost_cue: Option<Instant> = None;
     while !stop.load(Ordering::SeqCst) && !stop_file.exists() && window.is_open() {
         let read_start = Instant::now();
         let raw = eye.read_raw_frame().context("frame read failed")?;
@@ -749,6 +765,22 @@ fn track_loop(eye: &Ps3Eye, width: usize, height: usize) -> Result<()> {
                 tracker.recenter();
                 log::info!("recentered (Ctrl+Alt+R)");
                 beep(BEEP_RECENTER);
+            }
+            // Lost-face cue: the pose is held stale until the face returns, so
+            // ask for the user to come back and recenter.
+            if frame.detected {
+                if lost_since.take().is_some() {
+                    log::info!("face is back");
+                }
+            } else {
+                let since = *lost_since.get_or_insert_with(Instant::now);
+                if since.elapsed() >= LOST_GRACE
+                    && last_lost_cue.is_none_or(|t: Instant| t.elapsed() >= LOST_REPEAT)
+                {
+                    log::warn!("no face; playing the come-back cue");
+                    beep_lost();
+                    last_lost_cue = Some(Instant::now());
+                }
             }
             if frames % TARGET_FPS as usize == 0 {
                 log::info!(
