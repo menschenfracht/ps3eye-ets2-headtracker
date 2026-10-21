@@ -23,6 +23,15 @@ use crate::pose3d;
 /// anyway (about half a second at 30 fps), so a real change in face size
 /// cannot freeze the tracker.
 const FREEZE_LIMIT: u32 = 15;
+/// Consecutive rejections after which even an implausible jump is accepted, so
+/// a frozen tracker can re-acquire a face that moved far away. Long enough
+/// (1.5 s at 30 fps) that brief false positives never get through.
+const REACQUIRE_LIMIT: u32 = 45;
+/// Largest believable yaw/pitch/roll change between two frames. At 30 fps this
+/// is 1200°/s, far beyond any real head motion, so it only rejects garbage
+/// detections (fragments of the face, glasses highlights) that would otherwise
+/// teleport the pose.
+const MAX_JUMP_DEG: f32 = 40.0;
 
 /// Per-frame output used for drawing and logging.
 #[derive(Clone, Copy)]
@@ -104,6 +113,7 @@ impl Tracker {
         let mut detected = false;
         if let Some(face) = select_face(&faces, self.prev_center) {
             let eye = face.eye_distance();
+            let candidate = pose::estimate(&face.landmarks);
             // Reject a sudden collapse to a sub-region (face lost at extreme
             // yaw). A genuine turn foreshortens the eyes gradually, while a
             // sub-region detection drops by more than half in one step.
@@ -114,7 +124,16 @@ impl Tracker {
             // turned back. A long run of rejections means the face really did
             // shrink, so accept and re-baseline then.
             let plausible = self.ref_eye <= 0.0 || eye >= 0.6 * self.ref_eye;
-            if plausible || self.frozen_frames >= FREEZE_LIMIT {
+            // A fragment of the face can pass the size check briefly; its pose
+            // is nowhere near the current one, so gate on head-motion too.
+            let steady = self.last_pose.is_none_or(|prev| {
+                (candidate.yaw - prev.yaw).abs() <= MAX_JUMP_DEG
+                    && (candidate.pitch - prev.pitch).abs() <= MAX_JUMP_DEG
+                    && (candidate.roll - prev.roll).abs() <= MAX_JUMP_DEG
+            });
+            let accept = ((plausible || self.frozen_frames >= FREEZE_LIMIT) && steady)
+                || self.frozen_frames >= REACQUIRE_LIMIT;
+            if accept {
                 self.ref_eye = eye;
                 self.frozen_frames = 0;
                 detected = true;
