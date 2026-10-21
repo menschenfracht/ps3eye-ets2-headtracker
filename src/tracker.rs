@@ -19,6 +19,11 @@ use crate::output::OpenTrack;
 use crate::pose::{self, Pose, Tuning};
 use crate::pose3d;
 
+/// Consecutive sub-region rejections after which the detection is accepted
+/// anyway (about half a second at 30 fps), so a real change in face size
+/// cannot freeze the tracker.
+const FREEZE_LIMIT: u32 = 15;
+
 /// Per-frame output used for drawing and logging.
 #[derive(Clone, Copy)]
 pub struct Frame {
@@ -43,6 +48,8 @@ pub struct Tracker {
     smoothed_lm: Option<[(f32, f32); 5]>,
     smoothed_box: Option<(f32, f32, f32, f32)>,
     ref_eye: f32,
+    /// Consecutive frames rejected by the sub-region guard.
+    frozen_frames: u32,
     /// 3D landmark cloud captured at recenter (the pose zero point).
     reference: Option<Vec<Vector3<f32>>>,
     last_cloud: Option<Vec<Vector3<f32>>>,
@@ -72,6 +79,7 @@ impl Tracker {
             smoothed_lm: None,
             smoothed_box: None,
             ref_eye: 0.0,
+            frozen_frames: 0,
             reference: None,
             last_cloud: None,
             use_3d: var_os("HEADTRACK_3D").is_some(),
@@ -93,10 +101,19 @@ impl Tracker {
         let faces = self.detector.detect(rgb, width, height)?;
         if let Some(face) = select_face(&faces, self.prev_center) {
             let eye = face.eye_distance();
-            self.ref_eye = (self.ref_eye * 0.999).max(eye);
-            // Freeze when the detection shrinks to a sub-region (face lost at
-            // extreme yaw).
-            if eye >= 0.6 * self.ref_eye {
+            // Reject a sudden collapse to a sub-region (face lost at extreme
+            // yaw). A genuine turn foreshortens the eyes gradually, while a
+            // sub-region detection drops by more than half in one step.
+            //
+            // The reference is the last *accepted* distance, not the all-time
+            // maximum: the maximum could only decay 0.1% per frame, so a turn
+            // that pushed past 60% of it froze the tracker until the user
+            // turned back. A long run of rejections means the face really did
+            // shrink, so accept and re-baseline then.
+            let plausible = self.ref_eye <= 0.0 || eye >= 0.6 * self.ref_eye;
+            if plausible || self.frozen_frames >= FREEZE_LIMIT {
+                self.ref_eye = eye;
+                self.frozen_frames = 0;
                 let landmarks = match self.smoothed_lm {
                     Some(prev) => blend_landmarks(prev, face.landmarks, self.tuning.smoothing),
                     None => face.landmarks,
@@ -110,6 +127,8 @@ impl Tracker {
                 };
                 self.smoothed_box = Some(box_);
                 self.prev_center = Some(face.center());
+            } else {
+                self.frozen_frames += 1;
             }
         }
 
