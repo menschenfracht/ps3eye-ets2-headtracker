@@ -19,6 +19,40 @@ use crate::output::OpenTrack;
 use crate::pose::{self, Pose, Tuning};
 use crate::pose3d;
 
+/// Physical rig, used to reconcile "look at the camera" with "look at the
+/// screen".
+///
+/// The camera sits on top of the monitor, so gazing at the camera is a few
+/// degrees above gazing at the screen centre. Recentring on the camera without
+/// correcting for that leaves the neutral high, and every normal glance at the
+/// screen reads as negative pitch.
+mod rig {
+    /// Monitor diagonal, inches.
+    pub const MONITOR_DIAGONAL_IN: f32 = 32.0;
+    /// Panel aspect: width, height.
+    pub const MONITOR_ASPECT: (f32, f32) = (16.0, 9.0);
+    /// Eyes to the screen surface, cm (measured to the screen centre).
+    pub const EYE_TO_SCREEN_CM: f32 = 66.0;
+    /// Camera centre above the top edge of the panel, cm.
+    pub const CAMERA_ABOVE_EDGE_CM: f32 = 1.0;
+    /// Eyes above the screen centre, cm (0 = level with it).
+    ///
+    /// Cross-check: with these numbers the camera ends up 10.9 cm above the
+    /// eyes, so its distance from the eyes is sqrt(66² + 10.9²) = 66.9 cm,
+    /// matching the measured 67 cm.
+    pub const EYE_ABOVE_CENTRE_CM: f32 = 10.0;
+
+    /// How far below the camera the screen centre sits, in degrees of pitch.
+    #[must_use]
+    pub fn screen_offset_deg() -> f32 {
+        let (width, height) = MONITOR_ASPECT;
+        let panel_cm = MONITOR_DIAGONAL_IN * 2.54 * height / (width * width + height * height).sqrt();
+        let camera_above_centre = panel_cm / 2.0 + CAMERA_ABOVE_EDGE_CM;
+        let rise = camera_above_centre - EYE_ABOVE_CENTRE_CM;
+        rise.atan2(EYE_TO_SCREEN_CM).to_degrees()
+    }
+}
+
 /// Consecutive sub-region rejections after which the detection is accepted
 /// anyway (about half a second at 30 fps), so a real change in face size
 /// cannot freeze the tracker.
@@ -27,6 +61,12 @@ const FREEZE_LIMIT: u32 = 15;
 /// a frozen tracker can re-acquire a face that moved far away. Long enough
 /// (1.5 s at 30 fps) that brief false positives never get through.
 const REACQUIRE_LIMIT: u32 = 45;
+/// Smallest believable eye separation, in pixels. A fragment of the face, or
+/// whatever the detector finds when the camera is covered, is far below this;
+/// at a normal desk distance a real face is ~60-90 px. No delay or bypass may
+/// accept anything smaller, otherwise the baseline collapses and the tracker
+/// believes it is still looking at a face.
+const MIN_FACE_EYE_PX: f32 = 25.0;
 /// Largest believable yaw/pitch/roll change between two frames. At 30 fps this
 /// is 1200°/s, far beyond any real head motion, so it only rejects garbage
 /// detections (fragments of the face, glasses highlights) that would otherwise
@@ -61,6 +101,9 @@ pub struct Tracker {
     ref_eye: f32,
     /// Consecutive frames rejected by the sub-region guard.
     frozen_frames: u32,
+    /// Pitch bias applied at recenter: the screen centre is this many degrees
+    /// below the camera, so zero means "looking at the screen", not the lens.
+    screen_offset: f32,
     /// 3D landmark cloud captured at recenter (the pose zero point).
     reference: Option<Vec<Vector3<f32>>>,
     last_cloud: Option<Vec<Vector3<f32>>>,
@@ -78,6 +121,11 @@ impl Tracker {
         env: &Environment,
         port: u16,
     ) -> Result<Self> {
+        let screen_offset = rig::screen_offset_deg();
+        log::info!(
+            "screen centre sits {screen_offset:.1}° below the camera; \
+             recenter while looking at the camera"
+        );
         Ok(Self {
             detector: FaceDetector::load(detector_model, env)?,
             mesh: FaceMesh::load(landmark_model, env)?,
@@ -91,6 +139,7 @@ impl Tracker {
             smoothed_box: None,
             ref_eye: 0.0,
             frozen_frames: 0,
+            screen_offset,
             reference: None,
             last_cloud: None,
             use_3d: var_os("HEADTRACK_3D").is_some(),
@@ -99,10 +148,15 @@ impl Tracker {
     }
 
     /// Capture the current pose as the neutral (zero) reference.
+    ///
+    /// The user looks at the camera to recenter, so the pitch is biased down by
+    /// the camera's height above the screen: zero then means looking at the
+    /// screen centre, which is where the eyes rest in normal use.
     pub fn recenter(&mut self) {
         self.reference = self.last_cloud.clone();
-        if let Some(p) = self.last_pose {
-            self.neutral = Some(p);
+        if let Some(mut pose) = self.last_pose {
+            pose.pitch -= self.screen_offset;
+            self.neutral = Some(pose);
         }
     }
 
@@ -131,8 +185,12 @@ impl Tracker {
                     && (candidate.pitch - prev.pitch).abs() <= MAX_JUMP_DEG
                     && (candidate.roll - prev.roll).abs() <= MAX_JUMP_DEG
             });
-            let accept = ((plausible || self.frozen_frames >= FREEZE_LIMIT) && steady)
-                || self.frozen_frames >= REACQUIRE_LIMIT;
+            // Hard floor: never accept a "face" smaller than MIN_FACE_EYE_PX,
+            // not even via the freeze or re-acquire bypasses.
+            let big_enough = eye >= MIN_FACE_EYE_PX;
+            let accept = big_enough
+                && (((plausible || self.frozen_frames >= FREEZE_LIMIT) && steady)
+                    || self.frozen_frames >= REACQUIRE_LIMIT);
             if accept {
                 self.ref_eye = eye;
                 self.frozen_frames = 0;
