@@ -1,8 +1,8 @@
 //! The tracking pipeline shared by the preview and headless modes.
 //!
 //! detect (YuNet) → temporal/largest-face selection → landmark+box smoothing
-//! → pose (eyes+nose) → tuning (neutral/gain/deadzone/invert) → One-Euro
-//! → UDP to opentrack.
+//! → pose (eyes, nose and mouth) → tuning (neutral/gain/deadzone/invert)
+//! → One-Euro → UDP to opentrack.
 
 use std::env::var_os;
 use std::path::Path;
@@ -140,7 +140,7 @@ impl Tracker {
             return Ok(None);
         };
 
-        let [eye_left, eye_right, nose, _mouth_r, _mouth_l] = landmarks;
+        let [eye_left, eye_right, _, _, _] = landmarks;
         let eye_dist = (eye_right.0 - eye_left.0).hypot(eye_right.1 - eye_left.1);
 
         // 3D pose (opt-in, still being stabilised): run FaceMesh on the
@@ -179,7 +179,7 @@ impl Tracker {
             None
         };
 
-        let raw_pose = pose_3d.unwrap_or_else(|| pose::estimate(&[eye_left, eye_right, nose]));
+        let raw_pose = pose_3d.unwrap_or_else(|| pose::estimate(&landmarks));
         self.last_pose = Some(raw_pose);
 
         // The 3D rotation is already relative to the recenter reference, so it
