@@ -65,6 +65,8 @@ const RECORD_STAGES: [&str; 8] = [
 ];
 /// Seconds spent in each guided pose.
 const STAGE_SECS: f32 = 4.0;
+/// Countdown after Space before the first stage starts.
+const COUNTDOWN_SECS: f32 = 3.0;
 /// Guided capture output (one row per frame).
 const RECORD_FILE: &str = "docs/pose.csv";
 /// Mirror the preview image horizontally (camera view → mirror view), so head
@@ -400,12 +402,21 @@ fn preview_loop(eye: &Ps3Eye, width: usize, height: usize, record: bool) -> Resu
     log::info!("sending pose to opentrack at 127.0.0.1:{}", output::DEFAULT_PORT);
     let mut recorder = if record {
         log::info!("guided capture → {RECORD_FILE}; follow the highlighted arrow");
+        log::info!(
+            "sequence: {}",
+            RECORD_STAGES
+                .iter()
+                .enumerate()
+                .map(|(i, name)| format!("{}. {name}", i + 1))
+                .collect::<Vec<_>>()
+                .join(", ")
+        );
         Some(Recorder::create(RECORD_FILE)?)
     } else {
         None
     };
-    let started = Instant::now();
-    let mut last_stage = usize::MAX;
+    let mut armed: Option<Instant> = None;
+    let mut last_stage: Option<usize> = None;
 
     let mut window = minifb::Window::new(
         "PS3 Eye head tracker",
@@ -495,18 +506,28 @@ fn preview_loop(eye: &Ps3Eye, width: usize, height: usize, record: bool) -> Resu
             beep(BEEP_RECENTER);
         }
 
-        // Guided capture: advance the stage, cue it, and keep the arrow in
-        // sync with the stage clock.
-        let stage = if record {
-            ((started.elapsed().as_secs_f32() / STAGE_SECS) as usize).min(RECORD_STAGES.len())
-        } else {
-            0
-        };
-        if record && stage != last_stage {
-            if let Some(name) = RECORD_STAGES.get(stage) {
-                log::info!("stage {}/{}: {name}", stage + 1, RECORD_STAGES.len());
+        // Guided capture: Space arms the sequence, a countdown follows, then
+        // each stage runs for STAGE_SECS. `stage` is None while waiting.
+        if record && armed.is_none() && window.is_key_pressed(minifb::Key::Space, minifb::KeyRepeat::No) {
+            armed = Some(Instant::now());
+            beep(BEEP_START);
+            log::info!("armed; starting in {COUNTDOWN_SECS:.0}s");
+        }
+        let stage: Option<usize> = match (record, armed) {
+            (true, Some(t0)) => {
+                let t = t0.elapsed().as_secs_f32();
+                (t >= COUNTDOWN_SECS)
+                    .then(|| (((t - COUNTDOWN_SECS) / STAGE_SECS) as usize).min(RECORD_STAGES.len()))
             }
-            beep(BEEP_STAGE);
+            _ => None,
+        };
+        if stage != last_stage {
+            if let Some(s) = stage {
+                if let Some(name) = RECORD_STAGES.get(s) {
+                    log::info!("stage {}/{}: {name}", s + 1, RECORD_STAGES.len());
+                    beep(BEEP_STAGE);
+                }
+            }
             last_stage = stage;
         }
 
@@ -526,12 +547,11 @@ fn preview_loop(eye: &Ps3Eye, width: usize, height: usize, record: bool) -> Resu
                 draw_dot(&mut rgb, width, height, point.0, point.1, 0, 255, 0);
             }
 
-            if let Some(rec) = recorder.as_mut() {
-                rec.row(
-                    started.elapsed().as_secs_f32(),
-                    stage.min(RECORD_STAGES.len() - 1),
-                    &frame,
-                )?;
+            if let (Some(rec), Some(s)) = (recorder.as_mut(), stage) {
+                if s < RECORD_STAGES.len() {
+                    let t = armed.map_or(0.0, |t0| t0.elapsed().as_secs_f32());
+                    rec.row(t, s, &frame)?;
+                }
             }
 
             if frames % TARGET_FPS as usize == 0 {
@@ -565,20 +585,62 @@ fn preview_loop(eye: &Ps3Eye, width: usize, height: usize, record: bool) -> Resu
             draw_hud(&mut rgb, width, height, state, frame.eye_dist, frame.pose, &tracker.tuning);
         }
 
-        if record && stage < RECORD_STAGES.len() {
-            draw_guide(&mut rgb, width, height, stage_dir(stage));
-            draw_text_shadow(
-                &mut rgb,
-                width,
-                height,
-                6,
-                56,
-                &RECORD_STAGES[stage].to_uppercase(),
-                2,
-                255,
-                220,
-                0,
-            );
+        if record {
+            match (armed, stage) {
+                (None, _) => {
+                    draw_text_shadow(
+                        &mut rgb,
+                        width,
+                        height,
+                        6,
+                        56,
+                        "PRESS SPACE TO START",
+                        2,
+                        255,
+                        220,
+                        0,
+                    );
+                    draw_sequence(&mut rgb, width, height, None);
+                }
+                (Some(t0), None) => {
+                    let left = (COUNTDOWN_SECS - t0.elapsed().as_secs_f32()).max(0.0);
+                    draw_text_shadow(
+                        &mut rgb,
+                        width,
+                        height,
+                        6,
+                        56,
+                        &format!("GET READY  {left:.0}"),
+                        2,
+                        255,
+                        220,
+                        0,
+                    );
+                    draw_sequence(&mut rgb, width, height, Some(0));
+                }
+                (Some(_), Some(s)) if s < RECORD_STAGES.len() => {
+                    draw_guide(&mut rgb, width, height, stage_dir(s));
+                    draw_text_shadow(
+                        &mut rgb,
+                        width,
+                        height,
+                        6,
+                        56,
+                        &format!(
+                            "{}  {}/{}",
+                            RECORD_STAGES[s].to_uppercase(),
+                            s + 1,
+                            RECORD_STAGES.len()
+                        ),
+                        2,
+                        255,
+                        220,
+                        0,
+                    );
+                    draw_sequence(&mut rgb, width, height, Some(s));
+                }
+                _ => {}
+            }
         }
 
         rgb_to_u32(&rgb, width, height, &mut buffer);
@@ -587,7 +649,7 @@ fn preview_loop(eye: &Ps3Eye, width: usize, height: usize, record: bool) -> Resu
             .context("failed to update the preview window")?;
         stats.sample(eye, read, work_start.elapsed());
 
-        if record && stage >= RECORD_STAGES.len() {
+        if stage == Some(RECORD_STAGES.len()) {
             log::info!("guided capture complete");
             break;
         }
@@ -1042,6 +1104,21 @@ fn draw_guide(rgb: &mut [u8], width: usize, height: usize, active: Option<Dir>) 
 
     draw_rotate(rgb, width, height, (cx - 52.0, cy + 52.0), 26.0, false, colour(Dir::RollLeft));
     draw_rotate(rgb, width, height, (cx + 52.0, cy + 52.0), 26.0, true, colour(Dir::RollRight));
+}
+
+/// The whole capture sequence, numbered, with the current stage highlighted.
+fn draw_sequence(rgb: &mut [u8], width: usize, height: usize, active: Option<usize>) {
+    let mut y = 92_usize;
+    for (index, name) in RECORD_STAGES.iter().enumerate() {
+        let c = if active == Some(index) {
+            (255, 220, 0)
+        } else {
+            (150, 150, 150)
+        };
+        let label = format!("{}. {}", index + 1, name.to_uppercase());
+        draw_text_shadow(rgb, width, height, 8, y, &label, 1, c.0, c.1, c.2);
+        y += 18;
+    }
 }
 
 /// Draw a string with the 5x7 font, `scale` screen pixels per font pixel.
