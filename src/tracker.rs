@@ -34,6 +34,8 @@ pub struct Frame {
     pub pose: Pose,
     /// Pose straight from the landmarks, before neutral/gain/deadzone.
     pub raw_pose: Pose,
+    /// Whether this frame had a fresh detection (false = held/stale pose).
+    pub detected: bool,
 }
 
 pub struct Tracker {
@@ -99,6 +101,7 @@ impl Tracker {
     /// face is tracked yet.
     pub fn process(&mut self, rgb: &[u8], width: usize, height: usize) -> Result<Option<Frame>> {
         let faces = self.detector.detect(rgb, width, height)?;
+        let mut detected = false;
         if let Some(face) = select_face(&faces, self.prev_center) {
             let eye = face.eye_distance();
             // Reject a sudden collapse to a sub-region (face lost at extreme
@@ -114,6 +117,7 @@ impl Tracker {
             if plausible || self.frozen_frames >= FREEZE_LIMIT {
                 self.ref_eye = eye;
                 self.frozen_frames = 0;
+                detected = true;
                 let landmarks = match self.smoothed_lm {
                     Some(prev) => blend_landmarks(prev, face.landmarks, self.tuning.smoothing),
                     None => face.landmarks,
@@ -198,6 +202,7 @@ impl Tracker {
             eye_dist,
             pose,
             raw_pose,
+            detected,
         }))
     }
 }

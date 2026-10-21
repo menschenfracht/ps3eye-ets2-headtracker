@@ -259,7 +259,7 @@ impl Recorder {
         let mut out = std::io::BufWriter::new(file);
         writeln!(
             out,
-            "t_s,stage,move,eye_l_x,eye_l_y,eye_r_x,eye_r_y,nose_x,nose_y,\
+            "t_s,stage,move,detected,eye_l_x,eye_l_y,eye_r_x,eye_r_y,nose_x,nose_y,\
              mouth_r_x,mouth_r_y,mouth_l_x,mouth_l_y,\
              box_x0,box_y0,box_x1,box_y1,eye_dist,\
              yaw_raw,pitch_raw,roll_raw,yaw,pitch,roll"
@@ -271,9 +271,10 @@ impl Recorder {
         let [el, er, nose, mr, ml] = frame.landmarks;
         writeln!(
             self.out,
-            "{t:.3},{stage},{},{:.2},{:.2},{:.2},{:.2},{:.2},{:.2},{:.2},{:.2},{:.2},{:.2},\
+            "{t:.3},{stage},{},{},{:.2},{:.2},{:.2},{:.2},{:.2},{:.2},{:.2},{:.2},{:.2},{:.2},\
              {:.2},{:.2},{:.2},{:.2},{:.2},{:.3},{:.3},{:.3},{:.3},{:.3},{:.3}",
             RECORD_STAGES.get(stage).copied().unwrap_or("?"),
+            u8::from(frame.detected),
             el.0,
             el.1,
             er.0,
